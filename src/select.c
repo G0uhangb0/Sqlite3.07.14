@@ -1,3 +1,4 @@
+///勾航波
 /*
 ** 2001 September 15
 **
@@ -1351,6 +1352,7 @@ static const char *columnType(/*定义静态且是只读的字符型指针column
 	}
 	return zType;/*返回列类型*/
 }
+///勾航波
 
 /////////
 // 郭香丽
