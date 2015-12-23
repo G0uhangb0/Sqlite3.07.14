@@ -1,4 +1,4 @@
-﻿/*
+/*
 ** 2001 September 15
 **
 ** The author disclaims copyright to this source code.  In place of
@@ -11,280 +11,179 @@
 *************************************************************************
 ** This file contains C code routines that are called by the parser
 ** to handle SELECT statements in SQLite.
-**此文件包含 C 代码程序，它是由 SQLite中处理 SELECT 语句的语法分析器调用的。
-*/
-
-/*************************************************************************
-** This file contains C code routines that are called by the parser
-** to handle SELECT statements in SQLite.
 **此文件包含由语法分析器来处理在 SQLite 的 SELECT 语句调用的 C 代码例程
 */
 
-
-/*********************************************************************
-2001年9月15日
-**作者放弃版权这个源代码。在的地方一个合法的通知,这是一个祝福:
-**愿你做好事,而不是邪恶的。
-**愿你找到原谅自己,原谅他人。
-**可能你分享自由,永远不会超过你给。
-**
-*************************************************************************
-**此文件包含由语法分析器来处理在 SQLite 的 SELECT 语句调用的 C 代码例程
-***********************************************************************/
-
-/*
-** This file contains C code routines that are called by the parser
-** to handle SELECT statements in SQLite.
-**本文件包含SQLite中利用语法分析器处理SLEECT语句的C代码程序。SQLite的语法分析器使用Lemon LALR(1)分析程序生成器来产生，Lemon做的工作与YACC/BISON相同，但它使用不同的输入句法，这种句法更不易出错。Lemon还产生可重入的并且线程安全的语法分析器。Lemon定义了非终结析构器的概念，当遇到语法错误时它不会泄露内存。驱动Lemon的源文件可在parse.y中找到。
-    因为lemon是一个在开发机器上不常见的程序，所以lemon的源代码（只是一个C文件）被放在SQLite的"tool"子目录下。 lemon的文档放在"doc"子目录下
-*/
-#include "sqliteInt.h"  /*C语言中预编译处理器把sqliteInt.h文件中的内容加载到下面的程序中*/      /*预编译处理器把sqliteInt.h文件中的内容加载到程序中来*/
+#include "sqliteInt.h"  /*预编译处理器把sqliteInt.h文件中的内容加载到程序中来*/
 
 /*
 ** Trace output macros
 ** 跟踪输出宏
 */
 
-#if SELECTTRACE_ENABLED //预编译指令                                                            /*预编译处理器把预编译指令包含进来*/                                                          
-/***/ int sqlite3SelectTrace = 0;                                                               /*定义整型且赋值为0*/
-# define SELECTTRACE(K,P,S,X)                                                                   /*定义宏命令*/  
-  if(sqlite3SelectTrace&(K))                                                                    /*判断选择跟踪栈*/   
-    sqlite3DebugPrintf("%*s%s.%p: ",(P)->nSelectIndent*2-2,"",                        
-        (S)->zSelName,(S)),                                                                     /*给出输出值*/
-    sqlite3DebugPrintf X                                                                        /*定义常量X*/
+#if SELECTTRACE_ENABLED //预编译指令
+/***/ int sqlite3SelectTrace = 0;
+# define SELECTTRACE(K,P,S,X)  
+  if(sqlite3SelectTrace&(K))   
+    sqlite3DebugPrintf("%*s%s.%p: ",(P)->nSelectIndent*2-2,"",
+        (S)->zSelName,(S)),
+    sqlite3DebugPrintf X
 #else
-# define SELECTTRACE(K,P,S,X)                                                                   /*定义宏选择有四个参数*/
+# define SELECTTRACE(K,P,S,X)
 #endif
 
 /*
 ** An instance of the following object is used to record information about
 ** how to process the DISTINCT keyword, to simplify passing that information
 ** into the selectInnerLoop() routine.
-** 下面结构体的一个实例是用于记录有关如何处理DISTINCT关键字的信息，为了简化传递该信息到selectInnerLoop（）事务。
+**下面的一个实例对象是用来记录信息
+**如何处理DISTINCT关键字来简化传递这些信息
+**到selectInnerLoop()例程。
 */
 
-typedef struct DistinctCtx DistinctCtx;                                  /*定义结构体类型*/
-struct DistinctCtx {                                                     /*定义结构体名称*/
-	u8 isTnct;      /* 如果DISTINCT关键字存在则真  */                /*定义结构体关键字*/
-		u8 eTnctType;   /* 其中的WHERE_DISTINCT_*运算符*/        /*定义结构体中要使用的整型运算符*/
-		int tabTnct;    /* 处理DISTINCT的临时表*/                /*定义处理临时表的整型*/
-		int addrTnct;   /* OP_OpenEphemeral操作码的地址*/ 
+typedef struct DistinctCtx DistinctCtx;
+struct DistinctCtx {
+	u8 isTnct;      /* 如果DISTINCT关键字存在则真 */ 
+		u8 eTnctType;   /* WHERE_DISTINCT_ *运算符的其中之一*/ 
+		int tabTnct;    /* 用于DISTINCT处理的临时表*/
+		int addrTnct;   /* 为了 tabTnct存放OP_OpenEphemeral操作码的地址*/ 
 };
 
 /*
 ** An instance of the following object is used to record information about
 ** the ORDER BY (or GROUP BY) clause of query is being coded.
-** 下面结构体的一个实例是用于记录ORDER BY(或者 GROUP BY)查询字句的信息
+** 下面的一个实例对象是用来记录信息ORDER BY(或GROUP BY)子句的查询编码。 
 */
 
-typedef struct SortCtx SortCtx;                                                        /*定义结构体用来记录order by 查询子句的信息*/                                                       
-struct SortCtx {                                                                       /*定义结构体名称类型*/
-	ExprList *pOrderBy;   /* ORDER BY(或者 GROUP BY字句)*/                         /*定义排序中用到的查询列表*/
-		int nOBSat;           /* ORDER BY语句的数量满足指数*/                  /*定义查询的条件与要求*/
-		int iECursor;         /* 分类器的游标数目*/                            /*定义结构体分类器的游标数目*/
-		int regReturn;        /* 寄存器控制块输出返回地址*/                    /*定义结构体寄存器控制块输出的返回地址*/
-		int labelBkOut;       /* 块输出子程序的启动标签*/                      /*定义结构体中块输出子程序的启动标签*/  
-		int addrSortIndex;    /* OP_SorterOpen或者OP_OpenEphemeral的地址 */    /*定义结构体中查询时要用到的地址*/
-		u8 sortFlags;         /* 零或者更多的SORTFLAG_* 位 */                  /*定义结构体中更多需要查找到的位*/
+typedef struct SortCtx SortCtx;
+struct SortCtx {
+	ExprList *pOrderBy;   /* ORDER BY(或者 GROUP BY字句)*/ 
+		int nOBSat;           /* 满足指标的ORDER BY的数目*/
+		int iECursor;         /* 分类器的游标数目*/
+		int regReturn;        /* 存放输入输出返回地址的寄存器*/
+		int labelBkOut;       /* 块输出子程序的启动标签*/  
+		int addrSortIndex;    /* OP_SorterOpen或者OP_OpenEphemeral的地址 */ 
+		u8 sortFlags;         /* 零或者更多的SORTFLAG_* 位 */ 
 };
-#define SORTFLAG_UseSorter  0x01   /* 使用sorteropen代替openephemeral */               /*定义结构体用户编号*/
+#define SORTFLAG_UseSorter  0x01   /* 使用sorteropen代替openephemeral */ 
 
 /*
 ** Delete all the content of a Select structure.  Deallocate the structure
 ** itself only if bFree is true.
-** 删除选择结构的所有内容。仅当bFree是真的时候释放结构本身
+** 删除选择结构体的所有内容。仅且仅当bFree是真的时候释放结构本身
 */
-/*
-** Delete all the content of a Select structure but do not deallocate
-** the select structure itself.
-**删除查询结构的内容而不释放结构体本身。为了清除表达式
-*/
-static void clearSelect(sqlite3 *db, Select *p, int bFree){  /*函数的用处是用于清除*//*清除查询结构*/                                              /*定义删除函数用于清除查询结构*/
+
+static void clearSelect(sqlite3 *db, Select *p, int bFree){/*函数clearSelect的参数列表为sqlite3指针db，Select指针p，整型指针 bFree  */
 	while (p){
-		Select *pPrior = p->pPrior;                  /*将p->pPrior赋值给Select *pPrior*/                                                   /*定义需要赋值的参数*/
-			sqlite3ExprListDelete(db, p->pEList);        /*清除select结构体中的查询结果*/ /*删除整个表达式列表*/                       /*清除选择结构中表达式列表*/
-			sqlite3SrcListDelete(db, p->pSrc);           /*从表达式列表中清除FROM子句表达式*//*删除表达式列表中的FROM子句*/            /*清除from子句中的符合条件的表达式*/
-			sqlite3ExprDelete(db, p->pWhere);           /*从表达式列表中清除where子句表达式*//*递归删除where子句*/                     /*运用递归查法删除where子句*/
-			sqlite3ExprListDelete(db, p->pGroupBy);      /*从表达式列表中清除group by子句表达式*/ /*删除groupby子句*/                  /*清除group by子句表达式结构*/
-			sqlite3ExprDelete(db, p->pHaving);            /*从表达式列表中清除Having子句表达式*//*递归删除having子句*/                 /*运用递归查找方法删除having子句*/
-			sqlite3ExprListDelete(db, p->pOrderBy);    /*从表达式列表中清除Order by子句表达式*/ /*删除orderby*/                        /*删除orderby子句中的表达式*/
-			sqlite3ExprDelete(db, p->pLimit);           /*从表达式列表中清除Limit子句表达式*//*删除优先选择子句*/                      /*删除Limit子句表达式*/
-			sqlite3ExprDelete(db, p->pOffset);          /*从表达式列表中清除偏移量Offset子句表达式*//*递归删除限制返回数据数量的子句*/ /*删除偏移量offset子句表达式*/
-			sqlite3WithDelete(db, p->pWith);			 /*递归删除一个条件树*//*递归删除偏移量offset子句*/                 /*递归删除一个条件树*/
-
-			if (bFree)                                     /*如果树不为空*/                                                             /*判断一棵树是否为空*/
-				sqlite3DbFree(db, p);					 /*释放*db*/                                                /*释放占用的内存空间*/
-			p = pPrior;                                      /*pPrior赋值给p*/                                                  /*把pPrior的值赋给p*/
-			bFree = 1;               /*树不为空*/                                                                                              /*判断树不为空*/
+		Select *pPrior = p->pPrior;                  /*将p->pPrior赋值给Select *pPrior*/
+			sqlite3ExprListDelete(db, p->pEList);        /*删除整个表达式列表*/
+			sqlite3SrcListDelete(db, p->pSrc);           /*删除整个SrcList, 包括所有的子结构*/
+			sqlite3ExprDelete(db, p->pWhere);            /*在表达列表中递归删除一个表达式树*/
+			sqlite3ExprListDelete(db, p->pGroupBy);      /*删除整个表达式列表*/
+			sqlite3ExprDelete(db, p->pHaving);           /*递归删除一个表达式树*/
+			sqlite3ExprListDelete(db, p->pOrderBy);      /*在列表中删除整个表达式列表*/
+			sqlite3ExprDelete(db, p->pLimit);            /*递归删除一个表达式树*/
+			sqlite3ExprDelete(db, p->pOffset);           /*递归删除一个表达式树*/
+			sqlite3WithDelete(db, p->pWith);			 /*从表达式列表中清除偏移量Offset子句表达式*/
+			if (bFree)
+				sqlite3DbFree(db, p);					 /*释放*db*/
+				p = pPrior;
+		bFree = 1;
 	}
 }
 
 /*
 ** Initialize a SelectDest structure.
-** 初始化一个SelectDest结构.
+** 初始化一个查询结构.
 */
-/*
-** Initialize a SelectDest structure.
-**初始化一个SelectDest结构.为了创建一个SelectDest,传入参数，定制一个结构体
-*/
-void sqlite3SelectDestInit(SelectDest *pDest, int eDest, int iParm){ /*初始化SelectDest查询结构*/                /*建立函数用来传递参数*/
- /*函数sqlite3SelectDestInit的参数列表为  结构体SelectDest指针pDest， 整型指针 eDest ,整型指针iParm */
-			结构体SelectDest指针pDest，整型指针eDest，
-						整型指针iParm*/
-	pDest->eDest = (u8)eDest; /*把整型eDest强制类型转化为u8型，然后赋值给pDest->eDest                        /*用强制转换来赋值*/
-/*把整型eDest 强制类型转化为u8型，eDest是为了处理select操作结果*/
-
-	 u8是一个无符号字型，eDest是为了处理select操作结果*/
-	pDest->iSDParm = iParm; /*整型参数iParm赋值为pDest->iSDParm*/                                            /*利用赋值来进行传递操作*/
-/*整型参数iParm赋值为pDest->iSDParm，eDest的第几个处理方法，相当于设置eDest==SRT_Set，默认为0，表明没有设置*/
-	pDest->affSdst = 0;                                                                                      /*对pDest中参数进行赋值0*/
-/*0赋值给pDest->affSdst*//*把整型eDest 强制类型转化为u8型，eDest是为了处理select操作结果*/
-	pDest->iSdst = 0;                                                                                       /*对pDest中参数进行赋值0，结果写在寄存器中*/
-/*0赋值给pDest->iSdst*//*0赋值给pDest->iSdst，结果写在基址寄存器的编号，默认为0*/
-
-	pDest->nSdst = 0;                                                                                       /*对pDest中参数进行赋值0，分配寄存器的数量*/
- /*0赋值给pDest->nSdst*//*0赋值给pDest->nSdst，分配寄存器的数量*/
+void sqlite3SelectDestInit(SelectDest *pDest, int eDest, int iParm){/*函数sqlite3SelectDestInit的参数列表为
+																	  结构体SelectDest指针pDest，整型指针eDest，
+																	  整型指针iParm
+																	  */
+	pDest->eDest = (u8)eDest; /*把整型eDest强制类型转化为u8型，然后赋值给pDest->eDest*/
+	pDest->iSDParm = iParm; /*整型参数iParm赋值为pDest->iSDParm*/
+	pDest->affSdst = 0; /*相当于设置eDest==SRT_Set，默认为0，表明没有设置*/
+	pDest->iSdst = 0; /*结果写在基址寄存器的编号，默认为0*/
+	pDest->nSdst = 0; /*分配寄存器的数量，初始值为0*/
 }
 
-
 /*
 ** Allocate a new Select structure and return a pointer to that
 ** structure.
-** 分配一个新的select结构,并且返回一个指向该结构体的指针.
+** 分配一个新的Select结构并且返回一个指向该结构的指针.
 */
-/*
-** Allocate a new Select structure and return a pointer to that
-** structure.
-**分配一个新的选择结构并返回一个指向该结构体的指针.select语法分析最终在sqlite3SelectNew中完成，得到各个语法树汇总到Select结构体，然后根据结构体，进行语义分析生成执行计划。，
-*/
-Select *sqlite3SelectNew(               /*分配一个新的选择结构和返回一个结构的指针*/
-/*分配一个新的查询结构，返回一个指向该结构体的指针*/(/*select语法分析最终在sqlite3SelectNew中完成,它主要就是将之前得到的各个子语法树汇总到Select结构体，并根据该结构，进行接下来语义分析及生成执行计划等工作。*/
-	Parse *pParse,                  /*定义Parse类型指针*/      
-/* Parsing context  句法分析*//* Parsing context  语义分析*/
-	ExprList *pEList,               /*定义ExprList类型指针*/      
-/* which columns to include in the result  在结果中包含哪些列*//* which columns to include in the result  存放表达式列表*/
-
-	SrcList *pSrc,                  /*定义SrcList类型指针*/
- /* the FROM clause -- which tables to scan  from语法树，扫描有哪些表 */ /* the FROM clause -- which tables to scan  from存放from语法树---扫描表 */
-
-	Expr *pWhere,                   /*定义Expr类型指针*/         
-/* the WHERE clause       where部分的语法树 ，子句表达式放where子句*//* the WHERE clause  存放where语法树*/
-	ExprList *pGroupBy,              /*定义ExprList类型指针*/
-/* the GROUP BY clause    group by语句的语法树，表达式列表放Group by子句表达式*//* the GROUP BY clause   存放group by语法树*/
-	Expr *pHaving,                   /*定义Expr类型指针*/   
-/* the HAVING clause      having语句的语法树，放Having表达式*//* the HAVING clause  存放having语法树*/
-
-	ExprList *pOrderBy,               /*定义ExprList类型指针*/ 
-/* the ORDER BY clause    order by语句的语法树，表达式列表放Order by子句表达式*//* the ORDER BY clause  存放order by语法树*/
-
-	int isDistinct,                   /*定义整型参数判断distinct是否存在*/ 
-/* true if the DISTINCT keyword is present  如果关键字distinct存在，则返回true*//* true if the DISTINCT keyword is present  如果关键字distinct存在，则返回true*/
-
-	Expr *pLimit,                      /*定义Expr类型指针，判断limit是否在使用*/        
-/* LIMIT value.  NULL means not used  limit值，如果值为空意味着limit未使用*/ /* LIMIT value.  NULL means not used  limit值，如果值为空意味着limit未使用*/
-
-	Expr *pOffset                       /*定义Expr类型指针，判断pOffset是否在使用*/        
-/* OFFSET value.  NULL means no offset  offset值，如果值为空意味着offset未使用*//* OFFSET value.  NULL means no offset  offset值，如果值为空意味着offset未使用*/
-
+Select *sqlite3SelectNew(
+	Parse *pParse,        /* Parsing context  语法分析*/
+	ExprList *pEList,     /* which columns to include in the result  在结果中包含哪些列*/
+	SrcList *pSrc,        /* the FROM clause -- which tables to scan  FROM子句--要扫描表的表名 */
+	Expr *pWhere,         /* the WHERE clause  WHERE字句*/
+	ExprList *pGroupBy,   /* the GROUP BY clause   GROUP BY字句*/
+	Expr *pHaving,        /* the HAVING clause  HAVING字句*/
+	ExprList *pOrderBy,   /* the ORDER BY clause  ORDER BY字句*/
+	int isDistinct,       /* true if the DISTINCT keyword is present  如果关键字distinct存在，则返回true*/
+	Expr *pLimit,         /* LIMIT value.  NULL means not used  limit值，如果值为空意味着limit未使用*/
+	Expr *pOffset         /* OFFSET value.  NULL means no offset  offset值，如果值为空意味着offset未使用*/
 	){
-	Select *pNew;                        /*定义Selcet类型指针,指向新指针*/
-/*定义结构体指针pNew*//*创建一个select结构体指针pNew*/
-
-	Select standin;                      /*定义Select类型指针,指向standin指针变量*/
-/*定义结构体类型变量standin*//*创建一个select结构体类型变量standin*/
-	sqlite3 *db = pParse->db;             /*/*结构体Parse的成员db赋值给结构体sqlite3指针db*/*/
-/*结构体Parse的成员db赋值给结构体sqlite3指针db*//*创建一个sqlite3结构体，这是主数据库的结构体，并将解析上下文中的数据赋值给它的数据指针*/
-
-	pNew = sqlite3DbMallocZero(db, sizeof(*pNew));  /* 分配和零内存，如果分配失败，使mallocFaied标志在连接指针中。 */ 
-/* 分配并清空内存，分配大小为第二个参数的内存。 *//* 分配和清空内存，如果分配失败，将mallocFaied标志放入连接指针中。*/
-
+	Select *pNew;/*定义结构体指针pNew*/
+	Select standin;/*定义结构体类型变量standin*/
+	sqlite3 *db = pParse->db;/*结构体Parse的成员db赋值给结构体sqlite3指针db*/
+	pNew = sqlite3DbMallocZero(db, sizeof(*pNew));  /* 分配和零内存，如果分配失败，使mallocFaied标志在连接指针中。 */
 	assert(db->mallocFailed || !pOffset || pLimit); /* 判断分配是否失败,或pOffset值为空,或pLimit值不为空*/
-/* 判断分配是否失败,或pOffset值为空,或pLimit值不为空*//* 判断分配是否失败,或pOffset值为空,或pLimit值不为空，如果条件为真，则终止当前操作*/
-	if (pNew == 0){         /*如果结构体指针变量pNew指向的地址为0*/
-/*如果结构体指针变量pNew分配失败*//*如果结构体指针变量pNew指向的地址为0，即创建结构体指针失败*/
-
-		assert(db->mallocFailed);/*如果分配失败，重新申请分配内存*/  
-		pNew = &standin;         /*把standin的内存地址值赋给pNew*/
-/*把standin的存储地址赋给pNew*/      /*把standin的存储地址赋给pNew指针常量*/
-		memset(pNew, 0, sizeof(*pNew));  /*调用memset()函数给pNew赋值*/
-/*将pNew中前sizeof(*pNew)个字节用0替换并且返回pNew*/
+	if (pNew == 0){/*如果结构体指针变量pNew分配失败*/
+		assert(db->mallocFailed);/*如果分配失败，使mallocFaied标志在连接指针中*/
+		pNew = &standin;/*把standin的存储地址赋给pNew*/
+		memset(pNew, 0, sizeof(*pNew));/*将pNew中前sizeof(*pNew)个字节用0替换并且返回pNew*/
 	}
-	if (pEList == 0){   /*判断pEList表达式是否为空*/
-/*如果表达式列表为空*/
-		pEList = sqlite3ExprListAppend(pParse, 0, sqlite3Expr(db, TK_ALL, 0));   /*调用函数给pEList赋值，重新分配内存*/
-/*在表达式列表后追加一条表达式，如果没有表达式，列表会新建一个再加入*/													
-	                }
-	pNew->pEList = pEList;   /*pEList指向元素的地址赋给pNew->pEList*/
-/*pEList指向元素的地址赋给pNew->pEList*/
-	if (pSrc == 0) pSrc = sqlite3DbMallocZero(db, sizeof(*pSrc)); /*如果pSrc取值0时，申请内存空间*/
-/*分配并清空内存，分配大小为第二个参数的内存，如果分配失败，会在mallocFailed中做标记*/
-	pNew->pSrc = pSrc;     /*pNew指向元素的地址赋给pNew->pSrc*/
-/*如果pSrc取值0时，申请内存空间*/
-/*为Select结构体中FROM子句表达式赋值*/
-	pNew->pWhere = pWhere;/*pWhere指向元素的地址赋给pNew->pWhere*/
-/*为Select结构体中Where子句表达式赋值*/
-	pNew->pGroupBy = pGroupBy;/*pGroupBy指向元素的地址赋给pNew->pGroupBy*/
-/*为Select结构体中GroupBy子句表达式赋值*/
-	pNew->pHaving = pHaving;/*pHaving指向元素的地址赋给pNew->pHaving*/
-/*为Select结构体中Having子句表达式赋值*/
-	pNew->pOrderBy = pOrderBy; /*pOrderBy指向元素的地址赋给pNew->pOSrderBy*/
-/*为Select结构体中OrderBy子句表达式赋值*/
-	pNew->selFlags = isDistinct ? SF_Distinct : 0;   /*指向元素的地址赋给pNew->pEList*/
-/*设置SF_*中的值*/
-	pNew->op = TK_SELECT;   /*TK_SELECT指向元素的地址赋给pNew->op*/
-/*只能设置为TK_UNION TK_ALL TK_INTERSECT TK_EXCEPT 其中一个值*/
-	pNew->pLimit = pLimit;   /*pLimit指向元素的地址赋给pNew->pLimit*/
-/*为Select结构体中Limit子句表达式赋值*/
-	pNew->pOffset = pOffset;  /*pOffset指向元素的地址赋给pNew->pOffset*/
-/*为Select结构体中Offset子句表达式赋值*/
-	assert(pOffset == 0 || pLimit != 0);  /*调用函数选择赋值*/
-/*如果偏移量为空，或者Limit不为空，则分配内存*/
-	pNew->addrOpenEphm[0] = -1;   /*把-1赋值给pNew->addrOpenEphm[0] */
-    /*对地址信息初始化*/
-	pNew->addrOpenEphm[1] = -1;   /*把-1赋值给pNew->addrOpenEphm[1] */
-		  /*对地址信息初始化*/
-	pNew->addrOpenEphm[2] = -1;   /*把-1赋值给pNew->addrOpenEphm[2] */
-   		  /*对地址信息初始化*/
-	if (db->mallocFailed) {        /*判断分配内存是否失败*/ 
-     /*如果内存分配失败*/
-		clearSelect(db, pNew);  /*删除所有选择的内容结构但不释放选择结构本身*/      
-   /*调用clearSelect，清除Select结构体中内容*/
-		if (pNew != &standin) sqlite3DbFree(db, pNew);  /*如果pNew没有获得standin的地址，释放相关联的内存。 */
-/*如果Select结构体standin的地址未赋值给pNew，则清除pNew，*/
-		pNew = 0;           /*把pNew的值赋值为0*/               
- /*将Select结构体设置为空*/
+	if (pEList == 0){/*如果表达式列表为空*/
+		pEList = sqlite3ExprListAppend(pParse, 0, sqlite3Expr(db, TK_ALL, 0)); /*新添加的元素在表达式列表的末尾。新添加元素
+																				的地址赋给pEList。如果pList的初始数据为空，
+																				那么新建 一个新的表达式列表。如果出现内存
+																				分配错误，则整个列表被释放并返回空。如果
+																				返回的是非空，则保证新的条目成功追加。
+																				*/
+	}
+	pNew->pEList = pEList;/*pEList指向元素的地址赋给pNew->pEList*/
+	if (pSrc == 0) pSrc = sqlite3DbMallocZero(db, sizeof(*pSrc));/*分配并清空内存，分配大小为第二个参数的内存，如果分配失败，会在mallocFailed中做标记*/
+	pNew->pSrc = pSrc;/*为Select结构体中FROM子句表达式赋值*/
+	pNew->pWhere = pWhere;/*为Select结构体中Where子句表达式赋值*/
+	pNew->pGroupBy = pGroupBy;/*为Select结构体中GroupBy子句表达式赋值*/
+	pNew->pHaving = pHaving;/*为Select结构体中Having子句表达式赋值*/
+	pNew->pOrderBy = pOrderBy;/*为Select结构体中OrderBy子句表达式赋值*/
+	pNew->selFlags = isDistinct ? SF_Distinct : 0;/*设置SF_*中的值*/
+	pNew->op = TK_SELECT;/*只能设置为TK_UNION TK_ALL TK_INTERSECT TK_EXCEPT 其中一个值*/
+	pNew->pLimit = pLimit;/*为Select结构体中Limit子句表达式赋值*/
+	pNew->pOffset = pOffset;/*为Select结构体中Offset子句表达式赋值*/
+	assert(pOffset == 0 || pLimit != 0);/*如果偏移量为空，Limit不为空，则分配内存*/
+	pNew->addrOpenEphm[0] = -1;       /*对地址信息初始化*/
+	pNew->addrOpenEphm[1] = -1;		  /*对地址信息初始化*/
+	pNew->addrOpenEphm[2] = -1;		  /*对地址信息初始化*/
+	if (db->mallocFailed) {          /*如果不能分配内存*/
+		clearSelect(db, pNew);          /*清除Select结构体中内容*/
+		if (pNew != &standin) sqlite3DbFree(db, pNew);/*如果Select结构体standin的地址未赋值给pNew，则清除pNew，*/
+		pNew = 0;                      /*将Select结构体设置为空*/
 	}
 	else{                           /*能分配内存*/
-		assert(pNew->pSrc != 0 || pParse->nErr>0);   /*调用函数assert进行判断*/
-/*判断是否有From子句或者是否有分析错误*/
+		assert(pNew->pSrc != 0 || pParse->nErr>0);/*判断是否有From子句或者是否有分析错误*/
 	}
-	assert(pNew != &standin);    /*再次调用函数assert进行判断*/
-/*判断Select结构体是否同替换结构体standin的地址相同*/
-	return pNew;   /*返回pNew的值*/ 
-/*返回这个构造好的Select结构体*/
+	assert(pNew != &standin);/*判断Select结构体是否同替换结构体相同*/
+	return pNew;/*返回这个构造好的Select结构体*/
 }
 
 /*
 ** Delete the given Select structure and all of its substructures.
 ** 删除给定的选择结构和所有的子结构
 */
-void sqlite3SelectDelete(sqlite3 *db, Select *p){  /*删除给定的选择结构和所有的子结构*/
-/*删除已分配的查询结构和它所有的子结构
-定义数据库db以及Select类型的结构体p作为参数*/
-	if (p){  /*如果结构体指针p指向的地址非空*/
-/*如果Select结构体指针p存在*/
-		clearSelect(db, p); /*删除所有选择的内容结构但不释放选择结构本身*/  
-/*调用clearSelect函数，清空Select类型结构体p里面的内容*/
-		sqlite3DbFree(db, p);   /*空闲内存,可能被关联到一个特定的数据库连接。*/
- /*再调用sqlite3DbFree函数，释放掉空间*/
+void sqlite3SelectDelete(sqlite3 *db, Select *p){/*定义数据库db以及Select类型的结构体p作为参数*/
+	if (p){/*如果Select结构体指针p存在,p的值为ture*/
+		clearSelect(db, p);  /*清空Select类型结构体p里面的内容*/
+		sqlite3DbFree(db, p);  /*释放掉select结构体所占的空间*/
 	}
 }
-
 /*
 ** Given 1 to 3 identifiers preceeding the JOIN keyword, determine the
 ** type of join.  Return an integer constant that expresses that type
 ** in terms of the following bit values:
-** 在连接关键字前加一到三个标示符，决定使用何种连接方式。返回一个整数，表示使用以下的何种连接类型:
+** 在JOIN关键字前加一到三个标识符,确定加入的类型。返回一个整数常数表示该类型下的列值:
 **
 **     JT_INNER
 **     JT_CROSS
@@ -296,93 +195,73 @@ void sqlite3SelectDelete(sqlite3 *db, Select *p){  /*删除给定的选择结构
 ** A full outer join is the combination of JT_LEFT and JT_RIGHT.
 ** If an illegal or unsupported join type is seen, then still return
 ** a join type, but put an error in the pParse structure. 
-** 全外连接是JT_LEFT和JT_RIGHT结合。 如果检测到是非法字符或者不支持的连接类型，
-** 也会返回一个连接类型，但是会在pParse结构中放入一个错误信息。
+** 完全外连接是JT_LEFT和JT_RIGHT的组合。 如果发现非法或不受支持的连接类型,仍然要返回一个连接类型,但是要在pParse结构中保存这个错误信息
 */
-int sqlite3JoinType(Parse *pParse, Token *pA, Token *pB, Token *pC){ /*定义连接函数*/
-/*传入分析树，三个令牌结构体pA、pB、pC*/
-	int jointype = 0;/*定义连接整数类型*/
-/*默认连接类型为0*/
-	Token *apAll[3]; /*定义结构体指针数组apAll*/
-/*定义结构体指针数组apAll存放令牌*/
-	Token *p; /*定义结构体指针p*/
-/*声明一个临时令牌*/
+           
+int sqlite3JoinType(Parse *pParse, Token *pA, Token *pB, Token *pC){/*定义分析树变量pParse以及三个符文结构体（符文：具有执行某些操作的权利的对象）参数*/
+	int jointype = 0;/*临时变量用于标示链接类型*/
+	Token *apAll[3];/*定义符文类型结构体指针数组apAll*/
+	Token *p;/*定义符文类型结构体指针p*/
 	/*   0123456789 123456789 123456789 123 */
-	static const char zKeyText[] = "naturaleftouterightfullinnercross";  /*定义只读的且只能在当前模块中可见的字符型数组zKeyText，并对其进行赋值*/
-/*存放字符数组，里面装的是连接类型，在下文中进行调用*/
-	static const struct { /*定义只读的且只能在当前模块可见结构体*/
-/*声明一个内部结构体*/
-		u8 i;        /* 定义KeyText[] 中开始关键字的文本*/
-/* Beginning of keyword text in zKeyText[]   zKeyText数组的起始关键字*/
-		u8 nChar;    /*定义字符中关键字的长度*/
-/* Length of the keyword in characters  关键字的字符长度*/
-		u8 code;    /* 定义连接标识符类型 */
- /* Join type mask 标记连接类型*/
-	} aKeyword[] = { /*给定义的数组赋值*/
-/*声明一个关键字数组，根据下标和长度找到连接类型*/
-		/* natural 下标从0开始，长度为7，自然连接 */{ 0, 7, JT_NATURAL },/* natural 自然连接 */
-		/* left   下标从6开始，长度为4，左连接 */{ 6, 4, JT_LEFT | JT_OUTER },/* left   左连接 */
-		/* outer  下标从10开始，长度为5，外连接 */{ 10, 5, JT_OUTER },/* outer  外连接 *
-		/* right   下标从14开始，长度为5，右连接*/{ 14, 5, JT_RIGHT | JT_OUTER },/* right   右连接*/
-		/* full    下标从19开始，长度为4，全连接*/{ 19, 4, JT_LEFT | JT_RIGHT | JT_OUTER },/* full    全连接*/
-		/* inner  下标从23开始，长度为5，内连接 */{ 23, 5, JT_INNER },/* inner  内连接 */
-		/* cross   下标从28开始，长度为5，内连接或CROSS连接*/{ 28, 5, JT_INNER | JT_CROSS },/* cross   交叉连接*/
-	};//定义全部类型的连接，并给出起始位置、长度、连接类型
-	int i, j;/*定义两个整型数*/
-	apAll[0] = pA;/*令牌pA指向的地址赋给apAll[0]*/  /*指针pA指向的地址赋给apAll[0] */
-	apAll[1] = pB;/*指针pB指向的地址赋给apAll[1]*/  /*指针pB指向的地址赋给apAll[1] */
-	apAll[2] = pC;/*指针pC指向的地址赋给apAll[2] */  /*指针pc指向的地址赋给apAll[2] */
-	for (i = 0; i < 3 && apAll[i]; i++){ /*定义循环结构*/
-//循环处理apAll数组
-		p = apAll[i];/*指针apAll[i]的地址赋给指针p*/  /*指针apAll[i]的地址赋给指针p*/
-		if (p->n == aKeyword[j].nChar /*如果令牌中字符个数等于连接数组中的关键字长度*/
-			&& sqlite3StrNICmp((char*)p->z, &zKeyText[aKeyword[j].i], p->n) == 0){/*定义条件语句进行判断*
-/*并且p->z和p->n以及zKeyText[aKeyword[j].i]相等*/
-			jointype |= aKeyword[j].code; /*统计连接的个数*/
-/*如果通过了比较长度和内容，返回连接类型，注意是，使用的是“位或”*/
-			break;  /*跳出循环*/   //跳出本层循环
+	static const char zKeyText[] = "naturaleftouterightfullinnercross";/*存放字符数组，里面装的是连接类型，在下文中进行调用*/
+	static const struct {/*定义只读的且只能在当前模块可见结构体*/
+		u8 i;        /* Beginning of keyword text in zKeyText[]   在KeyText[] 中开始关键字的文本*/
+		u8 nChar;    /* Length of the keyword in characters  在字符中关键字的长度*/
+		u8 code;     /* Join type mask 标记连接类型*/
+	} aKeyword[] = {
+		/* natural 自然连接 */{ 0, 7, JT_NATURAL },/*下标从0开始，长度为7，自然连接*/
+		/* left   左连接 */{ 6, 4, JT_LEFT | JT_OUTER },/*下标从6开始，长度为4，左连接或外连接*/
+		/* outer  外连接 */{ 10, 5, JT_OUTER },/*下标从10开始，长度为5，外连接*/
+		/* right   右连接*/{ 14, 5, JT_RIGHT | JT_OUTER },/*下标从14开始，长度为5，右连接或外连接*/
+		/* full    全连接*/{ 19, 4, JT_LEFT | JT_RIGHT | JT_OUTER },/*下标从19开始，长度为4，左连接或右连接或外连接，实质是个全连接*/
+		/* inner  内连接 */{ 23, 5, JT_INNER },/*下标从23开始，长度为5，内连接*/
+		/* cross   交叉连接*/{ 28, 5, JT_INNER | JT_CROSS },/*下标从28开始，长度为5，内连接或CROSS连接，实质是个CROSS join*/
+	};//定义全部类型的连接
+	int i, j;
+	apAll[0] = pA;/*存放函数参数中的令牌pA*/
+	apAll[1] = pB;
+	apAll[2] = pC;/*将传人的三个符文结构体类型的参数分别赋值到符文结构体类型的apAll数组中 */
+	for (i = 0; i < 3 && apAll[i]; i++){//循环处理apAll数组
+		p = apAll[i];/*指针apAll[i]的地址赋给指针p*/
+		if (p->n == aKeyword[j].nChar /*如果符文中字符个数等于连接数组中的关键字长度*/
+			&& sqlite3StrNICmp((char*)p->z, &zKeyText[aKeyword[j].i], p->n) == 0){/*并且使用比较字符串函数比较*/
+			jointype |= aKeyword[j].code;/*如果通过了比较长度和内容，返回连接类型，注意是，使用的是“位或”*/
+			break;//跳出本层循环
 		}
 	}
-	testcase(j == 0 || j == 1 || j == 2 || j == 3 || j == 4 || j == 5 || j == 6);  /*调用函数testcase()进行选择*/  /*利用测试代码中testcast，测试j值，是否在这个范围*/
-	if (j >= ArraySize(aKeyword)){  /*给定义的数组赋值*/  /*如果j大于等于连接关键字数组*/
-		jointype |= JT_ERROR;  /*统计连接的个数*/  /*那就jointype与JT_ERROR“位或”，返回一个错误*/
-		break;  /*跳出循环*/   //跳出本层循环
+	testcase(j == 0 || j == 1 || j == 2 || j == 3 || j == 4 || j == 5 || j == 6);/*利用测试代码中testcast，测试j值，是否在这个范围*/
+	if (j >= ArraySize(aKeyword)){/*如果j比连接关键字数组还大*/
+		jointype |= JT_ERROR;/*那就jointype与JT_ERROR“位或”，返回一个错误*/
+		break;//跳出本层循环
 	  }
 	}
 	if (
-	(jointype & (JT_INNER | JT_OUTER)) == (JT_INNER | JT_OUTER) ||/*如果连接类型交上(JT_INNER|JT_OUTER)的结果，与JT_INNER和JT_OUTER一样*/
-	(jointype & JT_ERROR) != 0/*或者连接类型交上JT_ERROR不等于0*/
-	){  /*选择条件句判断*/
-		const char *zSp = " ";  /*只读的字符型指针zSp*/ /*空值赋给只读的字符型指针zSp*/
-		assert(pB != 0);  /*调用函数assert()*/  /*判断pB是否为空*/
-		if (pC == 0){ zSp++; }  /*如果指针pC指向的地址为0，那么指针zSp指向的地址前移一个存储单元*/  /*如果指针pC指向的地址为0，则zSp++*/
-		sqlite3ErrorMsg(pParse, "unknown or unsupported join type: ""%T %T%s%T", pA, pB, zSp, pC);  /*抛出错误消息*/  /*在Parse分析树中，存放一个错误信息”*/
-		jointype = JT_INNER ;  /*给返回类型赋值*/  /*默认使用内连接*/
+	(jointype & (JT_INNER | JT_OUTER)) == (JT_INNER | JT_OUTER) ||/*如果连接类型交上(JT_INNER|JT_OUTER)的结果等于JT_INNER和JT_OUTER一种*/
+	(jointype & JT_ERROR) != 0/*或者连接关键字是错误连接*/
+	){
+		const char *zSp = " "; /*只读的字符型指针zSp，初始值为空*/
+		assert(pB != 0);/*判断令牌pB是否为空*/
+		if (pC == 0){ zSp++; }/*如果指针pC指向的地址为0，则zSp++*/
+		sqlite3ErrorMsg(pParse, "unknown or unsupported join type: ""%T %T%s%T", pA, pB, zSp, pC);  /*输出错误消息“未知或者不支持的连接类型”*/
+		jointype = JT_INNER ;/*默认使用内连接*/
 	}
-	else if ((jointype & JT_OUTER) != 0/* 如果连接类型和外连接有交集*/
+	else if ((jointype & JT_OUTER) != 0 
 		&& (jointype & (JT_LEFT | JT_RIGHT)) != JT_LEFT){/*如果连接类型和外连接有交集，并且连接类型和(JT_LEFT|JT_RIGHT)交集，不是左连接*/
-		sqlite3ErrorMsg(pParse,"RIGHT and FULL OUTER JOINs are not currently supported");  /*考虑另一情况的判断*/  /*那么在Parse分析树中返回一个“右连接和全外连接当前不被支持”的错误消息”*/
-		jointype = JT_INNER; /*给返回类型赋值*/  /*默认使用内连接*/
+		sqlite3ErrorMsg(pParse,"RIGHT and FULL OUTER JOINs are not currently supported");/*输出错误消息“右连接和全外连接不被支持”*/
+		jointype = JT_INNER; /*默认使用内连接*/
 	}
-	return jointype;   /*返回连接数的个数*/  /*返回连接类型*/
+	return jointype;/*返回连接类型*/
 }
-
-
-
-
-
-
-
 
 /*
 ** Return the index of a column in a table.  Return -1 if the column
 ** is not contained in the table.
 ** 返回一个表中的列的索引。如果该列没有包含在表中返回-1。
 */
-static int columnIndex(Table *pTab, const char *zCol){/*定义静态的整型函数columnIndex，参数列表为列名——结构体指针pTab、表名——只读的字符型指针zCol*/
-	int i;/*定义临时变量*/
+static int columnIndex(Table *pTab, const char *zCol){/*定义静态的整型函数columnIndex，参数列表为结构体指针pTab、只读的字符型指针zCol*/
+	int i;/*定义局部变量*/
 	for (i = 0; i < pTab->nCol; i++){/*对所有的列进行遍历*/
-		if (sqlite3StrICmp(pTab->aCol[i].zName, zCol) == 0) return i;/*如果pTab->aCol[i].zName和zCol指向的地址是同一个地址，那么返回i*/
+		if (sqlite3StrICmp(pTab->aCol[i].zName, zCol) == 0) return i;/*如果匹配成功，那么返回i*/
 	}
 	return -1;/*否则，返回-1*/
 }
@@ -390,37 +269,37 @@ static int columnIndex(Table *pTab, const char *zCol){/*定义静态的整型函
 /*
 ** Search the first N tables in pSrc, from left to right, looking for a
 ** table that has a column named zCol.
-** 在FROM子句中扫描表，从左到右,查找前N个表,找一个含有列名为zCol的表 。
+** 在FROM子句中扫描表，从左到右查找前N个表，搜索列中有名为zCol的表。
 **
 ** When found, set *piTab and *piCol to the table index and column index
 ** of the matching column and return TRUE.
-** 找到之后,设置*piTab给表索引，设置*piCol给需要匹配的列索引，再返回TRUE
+** 当找到以后，设置* piTab和* piCol表索引和匹配列的列索引，并返回TRUE 。
 **
 ** If not found, return FALSE.
 ** 如果没有找到，返回FALSE。
 */
 static int tableAndColumnIndex(
-	SrcList *pSrc,       /* Array of tables to search 定义对数据库中表进行搜索*/
-	int N,               /* Number of tables in pSrc->a[] to search 对所有的列进行遍历*/
-	const char *zCol,    /* Name of the column we are looking for 定义字符常量，标记寻找的列名*/
-	int *piTab,          /* Write index of pSrc->a[] here 定义写入索引的数据类型表名*/
-	int *piCol           /* Write index of pSrc->a[*piTab].pTab->aCol[] here 定义写入索引的数据类型列名*/
+	SrcList *pSrc,       /* Array of tables to search 存放待查找的表的队列*/
+	int N,               /* Number of tables in pSrc->a[] to search 表的数目*/
+	const char *zCol,    /* Name of the column we are looking for 寻找的列名*/
+	int *piTab,          /* Write index of pSrc->a[] here 写入索引*/
+	int *piCol           /* Write index of pSrc->a[*piTab].pTab->aCol[] here 写入索引*/
 	){
-	int i;               /* For looping over tables in pSrc 为循环表中的遍历定义整型数据类型*/
-	int iCol;            /* Index of column matching zCol   定义索引要查找的列名*/
+	int i;               /* For looping over tables in pSrc 对pSrc遍历表*/
+	int iCol;            /* Index of column matching zCol   匹配上的列的索引，第几列*/
 
-	assert((piTab == 0) == (piCol == 0));  /* Both or neither are NULL  判断表索引和列索引是否都为空*/
-	for (i = 0; i < N; i++){/*定义循环结构进行遍历表中元素*/  /*遍历所有的表*/
-		iCol = columnIndex(pSrc->a[i].pTab, zCol); /*搜索定位列中的元素*/  /*返回表的列的索引赋给iCol，如果该列没有在表中，iCol的值是-1..*/
-		if (iCol >= 0){/*判断列索引是否存在*/  /*如果列索引存在*/
-			if (piTab){/*判断表索引是否存在*/  /*如果表索引存在*/
-				*piTab = i;/*把i的值赋给表中的项*/ /*把i 赋给指针piTab 的目标变量*/
-				*piCol = iCol;/*把目标变量赋给指针变量*/ /*把iCol 赋值给指针piCol 的目标变量*/
+	assert((piTab == 0) == (piCol == 0));  /* Both or neither are NULL  判断表索引和列索引都是或都不是空*/
+	for (i = 0; i < N; i++){/*遍历所有的表*/
+		iCol = columnIndex(pSrc->a[i].pTab, zCol); /*返回表的列的索引赋给iCol，如果该列没有在表中，iCol的值是-1.*/
+		if (iCol >= 0){/*如果列索引存在*/
+			if (piTab){/*如果表索引存在*/
+				*piTab = i;/*把i 赋给指针piTab 的目标变量*/
+				*piCol = iCol;/*把iCol 赋值给指针piCol 的目标变量*/
 			}
-			return 1;/*执行结束返回1*/  /*否则返回1*/
+			return 1;/*否则返回1*/
 		}
 	}
-	return 0;/*执行结束返回0*/
+	return 0;
 }
 
 /*
@@ -434,43 +313,45 @@ static int tableAndColumnIndex(
 ** (iSrc+1)'th. Column col1 is column iColLeft of tab1, and col2 is
 ** column iColRight of tab2.
 
-** 这个函数用来添加where子句解释含有JOIN语法句,从而解释select语句。
-** 这个新条款添加到含有where子句中的，格式如下:
+** 此函数功能是用来添加where子句解释含有JOIN语法句,从而解释select语句。
+** 是相比现有的WHERE子句的这种形式：
 **
 ** (tab1.col1 = tab2.col2)
 **
-** tab1是SrcList pSrc的iSrc'th表，tab2是(iSrc+1)'th。列col1是tab1的iColLeft列，col2是
+** tab1是SrcList pSrc的第iSrc张表，tab2是第(iSrc+1)张表。列col1是tab1的iColLeft列，col2是
 ** tab2的iColRight列
 */
-static void addWhereTerm(/*定义增加查询语句函数*/
-	Parse *pParse,                  /* Parsing context  定义数组类型的指针元素*/
-	SrcList *pSrc,                  /* List of tables in FROM clause   定义SrcList类型指针 */
-	int iLeft,                      /* Index of first table to join in pSrc  定义整型的左连接 */
-	int iColLeft,                   /* Index of column in first table  定义整型的左连接行*/
-	int iRight,                     /* Index of second table in pSrc  定义整型的右连接*/
-	int iColRight,                  /* Index of column in second table  定义整型的右连接行*/
-	int isOuterJoin,                /* True if this is an OUTER join  定义整型的外连接*/
-	Expr **ppWhere                  /* IN/OUT: The WHERE clause to add to  定义添加where子句的内存地址*/
-	){
-	sqlite3 *db = pParse->db;/*给数据库中的元素赋值*/
-	Expr *pE1; /*定义结构体中的指针元素*pE1*/
-	Expr *pE2; /*定义结构体中的指针元素*pE2*/
-	Expr *pEq; /*定义结构体中的指针元素*pE3*/
 
-	assert(iLeft<iRight);/*调用assert函数，所有元素向左移*/ /*判断如果第一个表索引值是否小于第二个表索引值*/
-	assert(pSrc->nSrc>iRight);/*调用assert函数，所有元素向右移*/ /*定义结构体中的指针元素*pE1*/ /*判断表集合中的表的数目是否大于右表的索引值*/
-	assert(pSrc->a[iLeft].pTab);/*调用assert函数，所有元素向左移进表中*/ /*判断表集合中表中左表索引的表是否为空*/
-	assert(pSrc->a[iRight].pTab);/*调用assert函数，所有元素向右移进表中*/ /*判断表集合中表中右表索引的表是否为空*/
+
+static void addWhereTerm(
+	Parse *pParse,                  /* Parsing context  语义分析*/
+	SrcList *pSrc,                  /* List of tables in FROM clause   from字句中的列表 */
+	int iLeft,                      /* Index of first table to join in pSrc  第一个连接的表索引 */
+	int iColLeft,                   /* Index of column in first table  第一个表的列索引*/
+	int iRight,                     /* Index of second table in pSrc  第二个连接的表索引*/
+	int iColRight,                  /* Index of column in second table  第二个表的列索引*/
+	int isOuterJoin,                /* True if this is an OUTER join  如果是外连接则返回true*/
+	Expr **ppWhere                  /* IN/OUT: The WHERE clause to add to  where子句添加到in/out*/
+	){
+	sqlite3 *db = pParse->db;/*声明一个数据库连接*/
+	Expr *pE1; /*定义结构体指针pE1*/
+	Expr *pE2; /*定义结构体指针pE2*/
+	Expr *pEq; /*定义结构体指针pEq*/
+
+	assert(iLeft<iRight);/*判断如果第一个表索引值是否小于第二个表索引值*/
+	assert(pSrc->nSrc>iRight);/*判断表集合中的表的数目是否大于右表的索引值*/
+	assert(pSrc->a[iLeft].pTab);/*判断表集合中表中左表索引的表是否为空*/
+	assert(pSrc->a[iRight].pTab);/*判断表集合中表中右表索引的表是否为空*/
 
 	pE1 = sqlite3CreateColumnExpr(db, pSrc, iLeft, iColLeft);/*分配并返回一个表达式指针去加载表集合中左表的一个列索引*/
 	pE2 = sqlite3CreateColumnExpr(db, pSrc, iRight, iColRight);/*分配并返回一个表达式指针去加载表集合中右表的一个列索引*/
 
 	pEq = sqlite3PExpr(pParse, TK_EQ, pE1, pE2, 0);/*分配一个额外节点连接这两个子树表达式*/
-	if (pEq && isOuterJoin){/*如果定义结构体指针pEq指向的地址非空且isOuterJoin为真*/
+	if (pEq && isOuterJoin){/*如果pEq表达式是全连接表达式*/
 		ExprSetProperty(pEq, EP_FromJoin);/*那么在连接中使用ON或USING子句*/
 		assert(!ExprHasAnyProperty(pEq, EP_TokenOnly | EP_Reduced));/*判断pEq表达式是否是EP_TokenOnly或EP_Reduced*/
 		ExprSetIrreducible(pEq);/*调试pEq,设置是否可以约束*/
-		pEq->iRightJoinTable = (i16)pE2->iTable;/*指定第二个表达式的表赋值给要连接的右表*/
+		pEq->iRightJoinTable = (i16)pE2->iTable;/*指定要连接的右表是第二个表达式的表*/
 	}
 	*ppWhere = sqlite3ExprAnd(db, *ppWhere, pEq);/*对指定数据库的表达式是进行连接*/
 }
@@ -479,7 +360,7 @@ static void addWhereTerm(/*定义增加查询语句函数*/
 ** Set the EP_FromJoin property on all terms of the given expression.
 ** And set the Expr.iRightJoinTable to iTable for every term in the
 ** expression.
-** 在给出的所有的表达式的条款中，设定EP_FromJoin（FROM连接表达式）属性。并给iTable的每一种
+** 在给定的表达式中的所有条件进行EP_FromJoin的属性设置。并给iTable的每一种
 ** 表达形式进行Expr.iRightJoinTable设置。
 **
 ** The EP_FromJoin property is used on terms of an expression to tell
@@ -488,9 +369,9 @@ static void addWhereTerm(/*定义增加查询语句函数*/
 ** of the more general WHERE clause.  These terms are moved over to the
 ** WHERE clause during join processing but we need to remember that they
 ** originated in the ON or USING clause.
-** EP_FromJoin属性作为表达式的条款，表达左外连接的处理逻辑，它是ON或者USING特定限制连接中的一部分，
-**但通常不作为WHERE子句的一部分。这些术语在表连接处理中移植到where中使用，我们需要记住它来源于on或using子句。
-	
+** EP_FromJoin 属性用于左外连接处理逻辑的表达形式，这种形式是加入限制指定on或者
+** using子句的一部分，不是一般where子句的一部分。在连接处理阶段这些术语移植到where 
+** 子句中使用，但是我们必须记住它们起源于on或者useing子句。
 **
 ** The Expr.iRightJoinTable tells the WHERE clause processing that the
 ** expression depends on table iRightJoinTable even if that table is not
@@ -508,19 +389,21 @@ static void addWhereTerm(/*定义增加查询语句函数*/
 ** Expr.iRightJoinTable告诉where子句表达式依靠表iRightJoinTable处理，即使表在
 ** 表达式中没有明确提到。这些信息需要像这个例子:
 ** SELECT * FROM t1 LEFT JOIN t2 ON t1.a=t2.b AND t1.x=5
-** where 子句需要推迟处理t1.x=5，直到t2循环连接完毕。通过这种方式,每当t1.x!=5时，一个NULL t2行将被加入。
-**如果我们没有延时处理t1.x=5，将会在t1循环完后立刻被处理，列t1.x!=5永远不会输出，这是不正确的。
+** where 子句需要推迟处理t1.x=5，直到加入t2循环之后。以这种方式，
+** 每当t1.x!=5时，一个NULL t2行将被加入。如果我们不推迟 t1.x=5的处理，
+** 将会被立即处理后与t1循环和列t1.x!=5永远不会输出，这是不正确的。
 */
-static void setJoinExpr(Expr *p, int iTable){/*定义静态连接函数，调用元素的值*/  /*函数setJoinExpr的参数列表为结构体指针p，整型iTable*/
-	while (p){/*定义循环函数进行查找元素*/ /*当p为真时循环*/
-		ExprSetProperty(p, EP_FromJoin);/*调用递归函数进行赋值*/ /*设置join中使用ON和USING子句*/
-		assert(!ExprHasAnyProperty(p, EP_TokenOnly | EP_Reduced));/*调用递归函数进行判断*/ /*判断表达式的属性，关于表达式的长度和剩余长度*/
-		ExprSetIrreducible(p);/*函数调用进行赋值*/ /*调试表达式，判读是否错误*/
-		p->iRightJoinTable = (i16)iTable;/*访问内存单元进行赋值*/ /*连接右表，即参数中传入的表*/
-		setJoinExpr(p->pLeft, iTable);/*调用连接函数进行赋值连接*/ /*递归调用自身*/
-		p = p->pRight;/*给指针向右方赋值*/ /*赋值表达式，将p赋值成为原来p的右子节点*/
+static void setJoinExpr(Expr *p, int iTable){/*传入一个表达式，一个待连接的表*/
+	while (p){/*当p为真时循环*/
+		ExprSetProperty(p, EP_FromJoin);/*设置join中使用ON和USING子句*/
+		assert(!ExprHasAnyProperty(p, EP_TokenOnly | EP_Reduced));/*判断表达式的属性，关于表达式的长度和剩余长度*/
+		ExprSetIrreducible(p);/*调试表达式，判读是否错误*/
+		p->iRightJoinTable = (i16)iTable;/*连接右表，即参数中传入的表*/
+		setJoinExpr(p->pLeft, iTable);/*递归调用自身*/
+		p = p->pRight;/*赋值表达式，将p赋值成为原来p的右子节点*/
 	}
 }
+
 
 /*
 ** This routine processes the join information for a SELECT statement.
@@ -536,46 +419,46 @@ static void setJoinExpr(Expr *p, int iTable){/*定义静态连接函数，调用
 ** entries 0 and 1.  Any ON or USING clauses associated with the join are
 ** also attached to the left entry.
 **from子句被Select.pSrc(Select结构体中FROM属性)所包含。
-**左最左边的表在Select.pSrc中是第一项。最右边的表是最后一项。
-**jojoin操作符在入口的左边。然后入口点0包含的连接操作符在入口0和入口1之间。任何涉及join的ON和USING子句，也将连接操作符放到左边入口。
+**左边的表通常是Select.pSrc的第一个入口。右边的表通常是最后一个入口（entry在hashmap中作为循环的节点入口，此处的理解的表连接遍历的记录入口）
+**join操作符在入口的左边。然后入口点0包含的连接操作符在入口0和入口1之间。与join相关联的的ON和USING子句，也将放到左边入口。
 **
 ** This routine returns the number of errors encountered.
-** 这个程序返回遇到错误的数量
+** 这个程序是用来返回遇到错误的数量
 */
-static int sqliteProcessJoin(Parse *pParse, Select *p){/*定义静态整型进程函数，传值*/ /*传入分析树pParse，Select结构体p**/
-	SrcList *pSrc;                  /* All tables in the FROM clause   对所有的列进行遍历*/
-	int i, j;                       /* Loop counters  定义循环计数器*/
-	struct SrcList_item *pLeft;     /* Left table being joined   定义结构体左指针项目*/
-	struct SrcList_item *pRight;    /* Right table being joined   定义结构体右指针项目*/
+static int sqliteProcessJoin(Parse *pParse, Select *p){/*传入分析树pParse，Select结构体p*/
+	SrcList *pSrc;                  /* All tables in the FROM clause   from子句中的所有表*/
+	int i, j;                       /* Loop counters *//*循环参数*/
+	struct SrcList_item *pLeft;     /* Left table being joined   左表被加入*/
+	struct SrcList_item *pRight;    /* Right table being joined   右表被加入*/
 
-	pSrc = p->pSrc;/*遍历结构体中的内存单元*/
-	pLeft = &pSrc->a[0];/*遍历结构体中的内存单元左表*/
-	pRight = &pLeft[1];/*遍历结构体中的内存单元右表*/
-	for (i = 0; i < pSrc->nSrc - 1; i++, pRight++, pLeft++){/*利用循环遍历结构体中的所有元素*/
-		Table *pLeftTab = pLeft->pTab;/*逐个访问表中的左向元素*/
-		Table *pRightTab = pRight->pTab;/*逐个访问表中的右向元素*/
-		int isOuter;/*定义判断的标记*/ /*用于判断*/
+	pSrc = p->pSrc;/*赋值pSrc为Select结构体中FROM子句属性*/
+	pLeft = &pSrc->a[0];/*将表数组中第一个表作为左表*/
+	pRight = &pLeft[1];/*将表数组中第二个表作为右表*/
+	for (i = 0; i < pSrc->nSrc - 1; i++, pRight++, pLeft++){/*循环表数组中所有表*/
+		Table *pLeftTab = pLeft->pTab;/*把pLeft->pTab赋给结构体指针pLeftTab*/
+		Table *pRightTab = pRight->pTab;/*把pRight->pTab赋给结构体指针pRightTab*/
+		int isOuter;/*用于判断*/
 
-		if (NEVER(pLeftTab == 0 || pRightTab == 0)) continue;/*判断左右表是否为空*/ /*如果左表或右表有一个为空则跳出本次循环*/
-		isOuter = (pRight->jointype & JT_OUTER) != 0;/*判断是否存在外部连接*/ /*右表的连接类型交外连接类型不为空，再赋值给isOute属性值*/
+		if (NEVER(pLeftTab == 0 || pRightTab == 0)) continue;/*如果左表或右表有一个为空则跳出本次循环*/
+		isOuter = (pRight->jointype & JT_OUTER) != 0;/*右表的连接类型交外连接类型不为空，再赋值给isOute属性值*/
 
 		/* When the NATURAL keyword is present, add WHERE clause terms for
 		** every column that the two tables have in common.
-		** 当natural关键字存在，并且WHERE子句的条件为两个表中有相同列。
-		*/
-		if (pRight->jointype & JT_NATURAL){/*判断左右连接是否存在*/ /*如果右表的连接类型是自然连接*/
-			if (pRight->pOn || pRight->pUsing){/*判断右表中是否有要查找的元素*/ /*如果右表有ON或USING子句*/
+		** 
+		*//*当存在NATURAL关键字，WHERE子句中，两个表中的共同列也会同时存在*/
+		if (pRight->jointype & JT_NATURAL){/*如果右表的连接类型是自然连接*/
+			if (pRight->pOn || pRight->pUsing){/*如果右表有ON或USING子句*/
 				sqlite3ErrorMsg(pParse, "a NATURAL join may not have "
-					"an ON or USING clause", 0);/*设置抛出异常的语句*/ /*那么就输出，自然连接中不能含有ON USING子句*/
+					"an ON or USING clause", 0);/*那么就输出，自然连接中不能含有ON USING子句*/
 				return 1;
 			}
-			for (j = 0; j < pRightTab->nCol; j++){/*查找成功返回1*/
-				char *zName;   /* Name of column in the right table 定义字符型名字*/
-				int iLeft;     /* Matching left table 定义左向连接符*/
-				int iLeftCol;  /* Matching column in the left table 定义左向连接符列*/
+			for (j = 0; j < pRightTab->nCol; j++){/*循环遍历右表中的列*/
+				char *zName;   /* Name of column in the right table 右表中列的名字*/
+				int iLeft;     /* Matching left table 匹配左表*/
+				int iLeftCol;  /* Matching column in the left table 在左表中匹配列*/
 
-				zName = pRightTab->aCol[j].zName;/*给列名赋值*/
-				if (tableAndColumnIndex(pSrc, i + 1, zName, &iLeft, &iLeftCol)){/*逐个访问数组中的元素*/
+				zName = pRightTab->aCol[j].zName;/*设置列名*/
+				if (tableAndColumnIndex(pSrc, i + 1, zName, &iLeft, &iLeftCol)){/*如果存在左表的列的索引*/
 					addWhereTerm(pParse, pSrc, iLeft, iLeftCol, i + 1, j,
 						isOuter, &p->pWhere);/*添加WHERE子句，设置左右表、列和连接方式*/
 				}
@@ -583,11 +466,11 @@ static int sqliteProcessJoin(Parse *pParse, Select *p){/*定义静态整型进�
 		}
 
 		/* Disallow both ON and USING clauses in the same join
-		** 不允许在同一个连接中使用on和using子句
+		** 不允许在同一个连接中同时使用on和using子句
 		*/
-		if (pRight->pOn && pRight->pUsing){/*判断左右连接是否可用  如果结构体指针pRight引用的成员变量錺On和pUsing非空*/
+		if (pRight->pOn && pRight->pUsing){/*如果右表中既有ON又有USING*/
 			sqlite3ErrorMsg(pParse, "cannot have both ON and USING "
-				"clauses in the same join");/*语法树中将会报错”*/
+				"clauses in the same join");/*输出错误信息“不允许在同一个连接中同时使用on和using子句”*/
 			return 1;
 		}
 
@@ -595,10 +478,10 @@ static int sqliteProcessJoin(Parse *pParse, Select *p){/*定义静态整型进�
 		** an AND operator.
 		** 将on子句添加到where子句的末尾，用and操作符连接
 		*/
-		if (pRight->pOn){/*如果结构体指针pRight引用的成员变量pOn非空*/
-			if (isOuter) setJoinExpr(pRight->pOn, pRight->iCursor);/*判断是否存在外连接*/ /*如果有外连接，设置连接表达式中ON子句和游标*/
-			p->pWhere = sqlite3ExprAnd(pParse->db, p->pWhere, pRight->pOn);/*利用where语句进行查找*/  /*设置将WHERE子句与ON子句连接一起，赋值给结构体的WHERE*/
-			pRight->pOn = 0;/*把0赋值给表中的右向元素*/ /*如果没有外连接，就设置不使用ON子句*/
+		if (pRight->pOn){/*如果右表中的ON关键字不为空*/
+			if (isOuter) setJoinExpr(pRight->pOn, pRight->iCursor);/*如果有外连接，设置连接表达式中ON子句和游标*/
+			p->pWhere = sqlite3ExprAnd(pParse->db, p->pWhere, pRight->pOn);/*设置将WHERE子句与ON子句连接一起，赋值给结构体的WHERE*/
+			pRight->pOn = 0;/*如果没有外连接，就设置不使用ON子句*/
 		}
 
 		/* Create extra terms on the WHERE clause for each column named
@@ -608,19 +491,18 @@ static int sqliteProcessJoin(Parse *pParse, Select *p){/*定义静态整型进�
 		** Report an error if any column mentioned in the USING clause is
 		** not contained in both tables to be joined.
 		** 在WHERE子句上为每一列创建一个额外的USING子句条款。例如：
-		** 如果两个表的连接是A和B,using列名为X,Y,Z,然后把它们添加到
-		** where子句:A.X=B.X AND A.Y=B.Y AND A.Z=B.Z
+		** 例如表A表B使用USING子句，USING中包含的是X Y Z 然后在添加到WHERE子句中：
+		** A.X=B.X AND A.Y=B.Y AND A.Z=B.Z
 		** 如果using子句中提到的任何列不包含在表的连接中，就会报告
 		** 一个错误。
-		TODO 分析
 		*/
-		if (pRight->pUsing){/*逐个访问表中的右表中的元素*/
-			IdList *pList = pRight->pUsing;/*把表中的元素逐个遍历*/
-			for (j = 0; j < pList->nId; j++){/*用循环遍历表中元素*/
-				char *zName;     /* Name of the term in the USING clause  用字符串定义表名*/
-				int iLeft;       /* Table on the left with matching column name   左边的表与匹配*/
-				int iLeftCol;    /* Column number of matching column on the left  左边的表与匹配的列名*/
-				int iRightCol;   /* Column number of matching column on the right  右边的表与匹配的列名*/
+		if (pRight->pUsing){/*如果右表中含有关键字USING*/
+			IdList *pList = pRight->pUsing;/*将右表中的USING赋值给标示符列表*/
+			for (j = 0; j < pList->nId; j++){/*遍历标示符列表*/
+				char *zName;     /* Name of the term in the USING clause  *//*USING子句在标示符列表中名字*/
+				int iLeft;       /* Table on the left with matching column name   左表与匹配的列名*/
+				int iLeftCol;    /* Column number of matching column on the left  左表匹配列的列数*/
+				int iRightCol;   /* Column number of matching column on the right  右表匹配列的列数*/
 
 				zName = pList->a[j].zName;/*标示符列表中的标示符*/
 				iRightCol = columnIndex(pRightTab, zName);/*根据右表和标示符右表的待匹配的列索引返回列号*/
@@ -642,49 +524,49 @@ static int sqliteProcessJoin(Parse *pParse, Select *p){/*定义静态整型进�
 /*
 ** Insert code into "v" that will push the record on the top of the
 ** stack into the sorter.
-** 把代码插入到"v"，分选机将会推进记录到栈的顶部。
+** 插入代码"v"，在分类器将会推进记录到栈的顶部。
 */
-static void pushOntoSorter(/*定义静态函数更新数据*/ /*推进记录到栈的顶部*/
-	Parse *pParse,        /*定义数组指针 */  /* Parser context  语义分析*/
-	ExprList *pOrderBy,  /*定义行列表*/   /* The ORDER BY clause   order by子句*/
-	Select *pSelect,      /*定义选择指针*/  /* The whole SELECT statement  整个select语句*/
-	int regData         /*定义整型数据记录*   /* Register holding data to be sorted  保持数据有序*/
+static void pushOntoSorter(
+	Parse *pParse,         /* Parser context  语义分析*/
+	ExprList *pOrderBy,    /* The ORDER BY clause   order by子句*/
+	Select *pSelect,       /* The whole SELECT statement  整个select语句*/
+	int regData            /* Register holding data to be sorted  保持数据有序*/
 	){
-	Vdbe *v = pParse->pVdbe;/*定义一个虚拟内存地址，并对其赋值*/ /*声明一个虚拟机*/
-	int nExpr = pOrderBy->nExpr; /*定义一个整型数据并赋值*//*声明一个ORDERBY表达式*/
-	int regBase = sqlite3GetTempRange(pParse, nExpr + 2);  /*定义获取元素函数*/ /*分配或释放一块连续的寄存器，返回一个整数值，把该值赋给regBase。*/
-	int regRecord = sqlite3GetTempReg(pParse);  /*定义获取函数元素并取值*/ /*分配一个新的寄存器用于控制中间结果。*/
-	int op; /*定义整型数据*/
-	sqlite3ExprCacheClear(pParse); /*释放指定的缓存内容*/  /*清除所有列的缓存条目*/
-	sqlite3ExprCodeExprList(pParse, pOrderBy, regBase, 0);  /*调用函数进行传值*/ /*将表达式列表中每个元素的每个值都放到一个队列中，返回一个元素的估计个数。*/
-	sqlite3VdbeAddOp2(v, OP_Sequence, pOrderBy->iECursor, regBase + nExpr); /*调用函数进行函数传值*/ /*将表达式放到VDBE中，再返回一个新的指令地址*/
-	sqlite3ExprCodeMove(pParse, regData, regBase + nExpr + 1, 1); /*调用移动函数进行传值*/  /*更改寄存器中的内容，这样做能及时更新寄存器中的列缓存数据*/
-	sqlite3VdbeAddOp3(v, OP_MakeRecord, regBase, nExpr + 2, regRecord); /*调用函数增加传值项*/  /*将nExpr放到当前使用的VDBE中，再返回一个新的指令的地址*/
-	if (pSelect->selFlags & SF_UseSorter){  /*调用判断进行选择*/ /*如果select结构体中selFlags的值是SF_UseSorter。*/
-		op = OP_SorterInsert;  /*对op值进行赋值*/ /*因为使用分拣器，所以操作符设置为插入分拣器*/
+	Vdbe *v = pParse->pVdbe;/*声明一个虚拟机*/
+	int nExpr = pOrderBy->nExpr;/*声明一个ORDERBY表达式*/
+	int regBase = sqlite3GetTempRange(pParse, nExpr + 2); /*分配或释放一块连续的寄存器，大小是表达式的个数加2，返回一个整数值，把该值赋给regBase。*/
+	int regRecord = sqlite3GetTempReg(pParse); /*分配一个新的寄存器用于控制中间结果。*/
+	int op;
+	sqlite3ExprCacheClear(pParse); /*清除所有语法分析树的缓存条目*/
+	sqlite3ExprCodeExprList(pParse, pOrderBy, regBase, 0);/*生成代码，将给定的表达式列表的每个元素的值放到寄存器开始的目标序列。返回元素评估的数量。*/
+	sqlite3VdbeAddOp2(v, OP_Sequence, pOrderBy->iECursor, regBase + nExpr);/*将表达式放到VDBE中，再返回一个新的指令地址*/
+	sqlite3ExprCodeMove(pParse, regData, regBase + nExpr + 1, 1);/*更改寄存器中的内容，这样做能及时更新寄存器中的列缓存数据*/
+	sqlite3VdbeAddOp3(v, OP_MakeRecord, regBase, nExpr + 2, regRecord);/*将nExpr放到当前使用的VDBE中，再返回一个新的指令的地址*/
+	if (pSelect->selFlags & SF_UseSorter){/*如果select结构体中selFlags的值是SF_UseSorter，提一下，selFlags的值全是以SF开头，这个表示使用了分拣器了。*/
+		op = OP_SorterInsert;/*因为使用分拣器，所以操作符设置为插入分拣器*/
 	}
 	else{
-		op = OP_IdxInsert; /*定义插入值*/ /*否则使用索引方式插入*/
+		op = OP_IdxInsert;/*否则使用索引方式插入*/
 	}
-	sqlite3VdbeAddOp2(v, op, pOrderBy->iECursor, regRecord); /*插入函数值*/ /*将Orderby表达式放到当前使用的VDBE中，然后返回一个新的指令地址*/
-	sqlite3ReleaseTempReg(pParse, regRecord);  /*释放寄存器中的值*/ /*释放regRecord寄存器*/
-	sqlite3ReleaseTempRange(pParse, regBase, nExpr + 2); /*继续释放寄存器中的值*/ /*释放regBase这个连续寄存器，长度是表达式的长度加2*/
-	if (pSelect->iLimit){ /*用判断语句进行判断表中值*/ /*如果使用Limit子句*/
-		int addr1, addr2; /*定义两个增加变量名*/
-		int iLimit;/*定义限制变量名*/
-		if (pSelect->iOffset){  /*判断是否使用了Offset偏移量*/ /*如果使用了Offset偏移量*/
-			iLimit = pSelect->iOffset + 1; /*那么Limit的值为偏移量加1*/ /*那么Limit的值为偏移量加1*/
+	sqlite3VdbeAddOp2(v, op, pOrderBy->iECursor, regRecord);/*将Orderby表达式放到当前使用的VDBE中，然后返回一个新的指令地址*/
+	sqlite3ReleaseTempReg(pParse, regRecord);/*释放regRecord寄存器*/
+	sqlite3ReleaseTempRange(pParse, regBase, nExpr + 2);/*释放regBase这个连续寄存器，长度是表达式的长度加2*/
+	if (pSelect->iLimit){/*如果使用Limit子句*/
+		int addr1, addr2;
+		int iLimit;
+		if (pSelect->iOffset){/*如果使用了Offset偏移量*/
+			iLimit = pSelect->iOffset + 1;/*那么Limit的值为偏移量加1*/
 		}
 		else{
-			iLimit = pSelect->iLimit; /*用表中的数据进行赋值*/  /*否则等于默认的，从第一个开始计算*/
+			iLimit = pSelect->iLimit;/*否则等于默认的，从第一个开始计算*/
 		}
-		addr1 = sqlite3VdbeAddOp1(v, OP_IfZero, iLimit); /*用地址名传值*/  /*这个地址是结果限制了返回的条数，给的新的指令地址*/
-		sqlite3VdbeAddOp2(v, OP_AddImm, iLimit, -1); /*调用添加函数进行传值*/ /*将指令放到当前使用的VDBE，然后返回一个地址*/
-		addr2 = sqlite3VdbeAddOp0(v, OP_Goto);/*把添加函数传的值赋给地址addr2*/ /*这个是使用Goto语句之后返回的地址*/
-		sqlite3VdbeJumpHere(v, addr1);/*调用连接函数传值*/ /*改变addr1的地址，以便VDBE指向下一条指令的地址*/
-		sqlite3VdbeAddOp1(v, OP_Last, pOrderBy->iECursor); /*调用添加函数传值*/ /*将ORDERBY指令放到当前使用的虚拟机中，返回Last操作的地址*/
-		sqlite3VdbeAddOp1(v, OP_Delete, pOrderBy->iECursor); /*再次调用添加函数传值*/ /*将ORDERBY指令放到当前使用的虚拟机中，返回Delete操作的地址*/
-		sqlite3VdbeJumpHere(v, addr2); /*调用连接函数进行传值*/ /*改变addr2的地址，以便VDBE指向下一条指令的地址*/
+		addr1 = sqlite3VdbeAddOp1(v, OP_IfZero, iLimit);/*这个地址是结果限制了返回的条数，给的新的指令地址*/
+		sqlite3VdbeAddOp2(v, OP_AddImm, iLimit, -1);/*将指令放到当前使用的VDBE，然后返回一个地址*/
+		addr2 = sqlite3VdbeAddOp0(v, OP_Goto);/*这个是使用Goto语句之后返回的地址*/
+		sqlite3VdbeJumpHere(v, addr1);/*改变addr1的地址，以便VDBE指向下一条指令的地址*/
+		sqlite3VdbeAddOp1(v, OP_Last, pOrderBy->iECursor);/*将ORDERBY指令放到当前使用的虚拟机中，返回Last操作的地址*/
+		sqlite3VdbeAddOp1(v, OP_Delete, pOrderBy->iECursor);/*将ORDERBY指令放到当前使用的虚拟机中，返回Delete操作的地址*/
+		sqlite3VdbeJumpHere(v, addr2);/*改变addr2的地址，以便VDBE指向下一条指令的地址*/
 	}
 }
 
@@ -692,18 +574,18 @@ static void pushOntoSorter(/*定义静态函数更新数据*/ /*推进记录到�
 ** Add code to implement the OFFSET
 ** 添加代码来实现offset偏移
 */
-static void codeOffset( /*定义静态偏移函数*/ /*实现offset偏移量功能*/
-	Vdbe *v,         /*定义数据库类型指针*/  /* Generate code into this VM  在虚拟器中生成代码*/
-	Select *p,        /*定义选择类型指针*/ /* The SELECT statement being coded  select语句被编码*/
-	int iContinue   /*定义整型连接符号*/   /* Jump here to skip the current record  从这里跳过当前记录*/
+static void codeOffset(
+	Vdbe *v,          /* Generate code into this VM *//*生成代码给虚拟机*/
+	Select *p,        /* The SELECT statement being coded *//*声明Select结构体*/
+	int iContinue     /* Jump here to skip the current record *//*从这里跳过当前记录*/
 	){
-	if (p->iOffset && iContinue != 0){ /*判断偏移量*/ /*如果Select结构体中含有IOffset属性值并且设置了跳过当前记录*/
-		int addr; /*定义整型地址传值*/
-		sqlite3VdbeAddOp2(v, OP_AddImm, p->iOffset, -1);/*调用添加函数传值*/ /*在VDBE中新添加一条指令，返回一个新指令的地址*/
-		addr = sqlite3VdbeAddOp1(v, OP_IfNeg, p->iOffset); /*传递调用函数传来的值*/ /*实质上调用sqlite3VdbeAddOp3（）修改指令的地址*/
-		sqlite3VdbeAddOp2(v, OP_Goto, 0, iContinue); /*调用添加函数传值*/ /*设置跳往的地址*/
-		VdbeComment((v, "skip OFFSET records")); /*调用函数进行传值*/ /*输入偏移量记录*/
-		sqlite3VdbeJumpHere(v, addr); /*调用连接函数传值*/ /*改变指定地址的操作，使其指向下一条指令的地址编码*/
+	if (p->iOffset && iContinue != 0){/*如果Select结构体中含有IOffset属性值并且设置了跳过当前记录*/
+		int addr;
+		sqlite3VdbeAddOp2(v, OP_AddImm, p->iOffset, -1);/*在VDBE中新添加一条指令，返回一个新指令的地址*/
+		addr = sqlite3VdbeAddOp1(v, OP_IfNeg, p->iOffset);/*实质上调用sqlite3VdbeAddOp3（）修改指令的地址*/
+		sqlite3VdbeAddOp2(v, OP_Goto, 0, iContinue);/*设置跳往的地址*/
+		VdbeComment((v, "skip OFFSET records"));/*输入偏移量记录*/
+		sqlite3VdbeJumpHere(v, addr);/*改变指定地址的操作，使其指向下一条指令的地址编码*/
 	}
 }
 
@@ -712,158 +594,159 @@ static void codeOffset( /*定义静态偏移函数*/ /*实现offset偏移量功�
 ** form a distinct entry.  iTab is a sorting index that holds previously
 ** seen combinations of the N values.  A new entry is made in iTab
 ** if the current N values are new.
-**  编写代码检查确定一个iMem表中N个注册者在一个单独的入口。
-** iTab是一个分类索引，预先能看到N个值的组合。如果在iTab中存在一个新的N值，那么在iTab 中将会产生一个新的入口。	
+** 添加代码，将检查确保N个寄存器开始iMem形成一个单独的条目。iTab是一个分类索引，
+** 预先见到的N值得组合。如果当前的N值是新的，一个新的条目由在iTab中产生。
+**
 ** A jump to addrRepeat is made and the N+1 values are popped from the
 ** stack if the top N elements are not distinct.
-** 如果N+1个值突然从栈中弹出，其中N个值是不唯一的，那么将会产生大量重复的地址（addrRepeat）
+** 如最上面N个元素不明显，则跳转到addrRepeat，N+1个值从栈中弹出。
 */
-static void codeDistinct( /*定义静态删除重复代码*/ /*去重*/
-	Parse *pParse,      /*定义数组指针*/ /* Parsing and code generating context 语义和代码生成*/
-	int iTab,         /*定义整型制表符*/  /* A sorting index used to test for distinctness 一个排列索引用于唯一性的测试*/
-	int addrRepeat,    /*定义地址定位记录*/ /* Jump to here if not distinct 如果没有“去除重复”跳到此处*/
-	int N,             /*定义记录数目N*/ /* Number of elements 元素数目*/
-	int iMem           /*定义整型菜单目录项*/ /* First element 第一个元素*/
+static void codeDistinct(
+	Parse *pParse,     /* Parsing and code generating context *//*分析语法树并且生成上下文*/
+	int iTab,          /* A sorting index used to test for distinctness *//*排序索引用来检测唯一性*/
+	int addrRepeat,    /* Jump to here if not distinct 如果没有“去除重复”跳到此处*/
+	int N,             /* Number of elements 元素数目*/
+	int iMem           /* First element 第一个元素*/
 	){
-	Vdbe *v; /*定义虚拟机的型号*/ /*虚拟机*/
-	int r1; /*定义整型数据*/
+	Vdbe *v;/*定义结构体指针v*/
+	int r1;
 
-	v = pParse->pVdbe; /*定义数组指针赋值*/ /*声明一个处理数据库字节码的引擎*/
-	r1 = sqlite3GetTempReg(pParse); /*传递函数值*/  /*分配一个新的寄存器用于控制中间结果，返回的整数赋给r1.*/
-	sqlite3VdbeAddOp4Int(v, OP_Found, iTab, addrRepeat, iMem, N); /*调用增加函数进行传值*/ /*把操作的值看成整数，然后添加这个操作符到虚拟机中*/
-	sqlite3VdbeAddOp3(v, OP_MakeRecord, iMem, N, r1); /*再次调用增加函数进行传值*/ /*调用sqlite3VdbeAddOp3（）修改指令的地址*/
-	sqlite3VdbeAddOp2(v, OP_IdxInsert, iTab, r1); /*定义增加函数进行传值*/ /*实际也是使用sqlite3VdbeAddOp3()只是参数变为前4个，修改指令的地址*/
-	sqlite3ReleaseTempReg(pParse, r1); /*释放函数传值*/ /*解除寄存器,sqlite3GetTempReg()分配的*/
-		
-	}
+	v = pParse->pVdbe;/*声明一个处理数据库字节码的引擎*/
+	r1 = sqlite3GetTempReg(pParse); /*分配一个新的寄存器用于控制中间结果，返回的整数赋给r1.*/
+	sqlite3VdbeAddOp4Int(v, OP_Found, iTab, addrRepeat, iMem, N);/*把操作的值看成整数，然后添加这个操作符到虚拟机中*/
+	sqlite3VdbeAddOp3(v, OP_MakeRecord, iMem, N, r1);/*调用sqlite3VdbeAddOp3（）修改指令的地址*/
+	sqlite3VdbeAddOp2(v, OP_IdxInsert, iTab, r1);/*实际也是使用sqlite3VdbeAddOp3()只是参数变为前4个，修改指令的地址*/
+	sqlite3ReleaseTempReg(pParse, r1);/*生成代码，将给定的表达式列表的每个元素的值放到寄存器开始的目标序列。返回元素评估的数量。释放寄存器*/
+}
 
-#ifndef SQLITE_OMIT_SUBQUERY /*结束宏定义*/ /*测试SQLITE_OMIT_SUBQUERY是否被宏定义过*/
+#ifndef SQLITE_OMIT_SUBQUERY/*测试SQLITE_OMIT_SUBQUERY是否被宏定义过*/
 /*
 ** Generate an error message when a SELECT is used within a subexpression
 ** (example:  "a IN (SELECT * FROM table)") but it has more than 1 result
 ** column.  We do this in a subroutine because the error used to occur
 ** in multiple places.  (The error only occurs in one place now, but we
 ** retain the subroutine to minimize code disruption.)
-**如果select中使用一个这样的子句（“a IN (SELECT * FROM table)”）将会产生错误。
-** 因为它有不止一个结果列。我们在子程序中这样做是因为错误通常发生在多个地方。
-** 现在这个错误只在一处发生，但是我们依然保留这个子程序最小化代码中断。
+** 当一个select语句中使用子表达式就产生一个错误的信息(例如:a in(select * from table))，
+** 但是它有多于1的结果列。我们在子程序中这样做是因为错误通常发生在多个地方。
+** (现在错误只发生在一个地方，但是我们保留中断的子程序将代码错误减少到最小。)
 */
-static int checkForMultiColumnSelectError(  /*定义静态整型函数查错*/ /*如果select中有不止一个结果列将会产生错误*/
-	Parse *pParse,      /*定义数组类型指针*/  /* Parse context. 语义分析 */
-	SelectDest *pDest,   /*定义数据库型数据类型*/ /* Destination of SELECT results   select结果的集合*/
-	int nExpr           /*定义整型数据标志*/ /* Number of result columns returned by SELECT  结果列的数目由select返回*/
+static int checkForMultiColumnSelectError(
+	Parse *pParse,       /* Parse context. 语义分析 */
+	SelectDest *pDest,   /* Destination of SELECT results   select结果的集合*/
+	int nExpr            /* Number of result columns returned by SELECT  结果列的数目由select返回*/
 	){
-	int eDest = pDest->eDest; /*给整型数据赋地址值*/ /*处理结果集*/
-	if (nExpr > 1 && (eDest == SRT_Mem || eDest == SRT_Set)){  /*如果结果集大于1并且select的结果集是SRT_Mem或SRT_Set*/
+	int eDest = pDest->eDest;/*处理结果集*/
+	if (nExpr > 1 && (eDest == SRT_Mem || eDest == SRT_Set)){/*如果结果集大于1并且select的结果集是SRT_Mem或SRT_Set*/
 		sqlite3ErrorMsg(pParse, "only a single result allowed for "
-			"a SELECT that is part of an expression"); /*抛出错误异常*/ /*在语法分析树中写一个错误信息*/
-		return 1; /*返回值结束*/ /*此处返回1，因为有select结果集，只不过可能大于1*/
+			"a SELECT that is part of an expression");/*输出错误信息*/
+		return 1;
 	}
 	else{
-		return 0; /*退出函数*/ /*如果没有满足条件，只返回0*/
+		return 0;
 	}
 }
-#endif /*结束函数*/ /*终止if*/ 
+#endif/*终止if*/
 
 /*
 ** This routine generates the code for the inside of the inner loop
 ** of a SELECT.
-** 这段程序产生的代码是为了select内连接循环。
+**  这段程序产生的代码是为了select内连接循环。
 **
 ** If srcTab and nColumn are both zero, then the pEList expressions
 ** are evaluated in order to get the data for this row.  If nColumn>0
 ** then data is pulled from srcTab and pEList is used only to get the
 ** datatypes for each column.
-** 如果取数据的表和列都是0，那么pEList表达式为了获得行数据进行赋值。
-** 如果srcTab（源表）中列数>0，那么数据从srcTab中拿出，pEList只用于从每一列获得数据类型。
+** 如果取数据的表和列都是0，然后提取数据的列表达式列表被认为需要得到这一行的数据。
+** 如果srcTab（源表）中列数>0，数据只从srcTab（源表）和pElist（被提取值列表）得到每一列的数据类型。
 */
-static void selectInnerLoop( /*定义选择插入函数*/  /*select内连接循环*/
-	Parse *pParse,        /*定义数组类型数据*/   /* The parser context 语义分析*/
-	Select *p,            /*定义选择型指针函数*/   /* The complete select statement being coded 完整的select语句被编码*/
-	ExprList *pEList,     /*定义列表型指针数据*/   /* List of values being extracted  输出结果列的语法树*/
-	int srcTab,           /*定义整型制表符*/   /* Pull data from this table 从这个表中提取数据*/
-	int nColumn,         /*定义整型数据列名*/    /* Number of columns in the source table  源表中列的数目*/
-	ExprList *pOrderBy,  /*定义排序列表型指针*/    /* If not NULL, sort results using this key 如果不是NULL，使用这个key对结果进行排序*/
-	int distinct,        /*定义删除整型数据*/    /* If >=0, make sure results are distinct 如果>=0，确保结果是不同的*/
-	SelectDest *pDest,  /*定义选择型插入指针类型数据*/     /* How to dispose of the results 怎样处理结果*/
-	int iContinue,       /*定义整型数据列名*/    /* Jump here to continue with next row 跳到这里继续下一行*/
-	int iBreak           /*定义中断循环变量*/    /* Jump here to break out of the inner loop 跳到这里中断内部循环*/
+static void selectInnerLoop(
+	Parse *pParse,          /* The parser context 语义分析*/
+	Select *p,              /* The complete select statement being coded 完整的select语句被编码*/
+	ExprList *pEList,       /* List of values being extracted  输出结果列的语法树*/
+	int srcTab,             /* Pull data from this table 从这个表中提取数据*/
+	int nColumn,            /* Number of columns in the source table  源表中列的数目*/
+	ExprList *pOrderBy,     /* If not NULL, sort results using this key 如果不是NULL，使用这个key对结果进行排序*/
+	int distinct,           /* If >=0, make sure results are distinct*//*如果distinct > 0,对结果进行“去除重复操作”*/
+	SelectDest *pDest,      /* How to dispose of the results 怎样处理结果*/
+	int iContinue,          /* Jump here to continue with next row 跳到这里继续下一行*/
+	int iBreak              /* Jump here to break out of the inner loop 跳到这里中断内部循环*/
 	){
-	Vdbe *v = pParse->pVdbe;  /*定义虚拟机且赋值*/  /*声明一个虚拟机*/
-	int i;               /*定义整型变量i*/ 
-	int hasDistinct;        /*定义删除类型数据*/  /* True if the DISTINCT keyword is present 如果distinct关键字存在返回true*/
-	int regResult;           /*定义整型数据用来定义结果*/     /* Start of memory holding result set 结果集的起始处*/
-	int eDest = pDest->eDest;  /*定义整型数据且赋值*/   /* How to dispose of results 怎样处理结果*/
-	int iParm = pDest->iSDParm; /*定义整型数组数据且赋值*/  /* First argument to disposal method 第一个参数的处理方法*/
-	int nResultCol;            /*定义返回结果值*/   /* Number of result columns 结果列的数目*/
+	Vdbe *v = pParse->pVdbe;/*声明一个虚拟机*/
+	int i;
+	int hasDistinct;        /* True if the DISTINCT keyword is present 如果distinct关键字存在返回true*/
+	int regResult;              /* Start of memory holding result set 开始的内存持有结果集*/
+	int eDest = pDest->eDest;   /* How to dispose of results 怎样处理结果*/
+	int iParm = pDest->iSDParm; /* First argument to disposal method 第一个参数的处理方法*/
+	int nResultCol;             /* Number of result columns 结果列的数目*/
 
-	assert(v); /*调用函数取值*/  /*判断虚拟机*/
-	if (NEVER(v == 0)) return;  /*调用判断来返回结果*/   /*如果虚拟机不存在，直接返回*/
-	assert(pEList != 0);/*调用函数判断是否能取到0*/   /*判断表达式列表是否为空*/
-	hasDistinct = distinct >= 0;  /*调用数据去除重复*/  /*赋值“去除重复”操作符*/
-	if (pOrderBy == 0 && !hasDistinct){   /*如果使用了ORDERBY交hasDistinct取反值*/
-		codeOffset(v, p, iContinue); /*调用函数进行取值判断*/  /*设置偏移量，VDBE和select确定，偏移参数是IContinue*/
+	assert(v);/*判断虚拟机*/
+	if (NEVER(v == 0)) return;/*如果虚拟机不存在，直接返回*/
+	assert(pEList != 0);/*判断表达式列表是否为空*/
+	hasDistinct = distinct >= 0;/*赋值“去除重复”操作符*/
+	if (pOrderBy == 0 && !hasDistinct){/*如果使用了ORDERBY交hasDistinct取反值*/
+		codeOffset(v, p, iContinue);/*设置偏移量，VDBE和select确定，偏移参数是IContinue*/
 	}
 
 	/* Pull the requested columns.
 	** 从要求的列中取出数据
 	*/
-	if (nColumn > 0){  /*判断表中列的数目是否大于0*/ /*如果表中列的数目大于0*/
-		nResultCol = nColumn; /*给列结果的值赋值*/ /*把列的数目赋给整型nResultCol*/
+	if (nColumn > 0){/*如果表中列的数目大于0*/
+		nResultCol = nColumn;/*把列的数目赋给整型nResultCol*/
 	}
 	else{
-		nResultCol = pEList->nExpr; /*如果列结果的值不合适则提取列数值*/  /*否则，赋值为被提取值得列数*/
+		nResultCol = pEList->nExpr;/*否则，赋值为被提取值得列数*/
 	}
-	if (pDest->iSdst == 0){ /*判断寄存器的地址是否为0*/ /*如果查询数据集的写入结果的基址寄存器的值为0*/
-		pDest->iSdst = pParse->nMem + 1; /*从第一个元素开始赋值*/ /*那么基址寄存器的值设为分析语法树的下一个地址*/
-		pDest->nSdst = nResultCol; /*赋值返回的列*/ /*注册寄存器的数量为结果列的数量*/
-		pParse->nMem += nResultCol; /*合并结果值*/ /*分析树的地址设为自身的再加上结果列的数量*/
+	if (pDest->iSdst == 0){/*如果查询数据集的写入结果的基址寄存器的值为0*/
+		pDest->iSdst = pParse->nMem + 1;/*那么基址寄存器的值设为分析语法树的下一个地址*/
+		pDest->nSdst = nResultCol;/*注册寄存器的数量为结果列的数量*/
+		pParse->nMem += nResultCol;/*分析树的地址设为自身的再加上结果列的数量*/
 	}
 	else{
-		assert(pDest->nSdst == nResultCol); /*调用函数取值*/ /*判断结果集中寄存器的个数是否与结果列的列数相同*/
+		assert(pDest->nSdst == nResultCol);/*判断结果集中寄存器的个数是否与结果列的列数相同*/
 	}
-	regResult = pDest->iSdst; /*给结果值赋值*/ /*再把储存结果集的寄存器的地址设为结果集的起始地址*/
-	if (nColumn > 0){ /*判断列值是否大于0*/ /*如果行数大于0*/
-		for (i = 0; i < nColumn; i++){ /*利用循环逐步操作*/ /*则遍历每一列*/
-			sqlite3VdbeAddOp3(v, OP_Column, srcTab, i, regResult + i); /*调用函数取值*/ /*将队列操作送入到VDBE再返回新的指令地址*/
+	regResult = pDest->iSdst;/*再把储存结果集的寄存器的地址设为结果集的起始地址*/
+	if (nColumn > 0){/*如果行数大于0*/
+		for (i = 0; i < nColumn; i++){/*则遍历每一列*/
+			sqlite3VdbeAddOp3(v, OP_Column, srcTab, i, regResult + i);/*将队列操作送入到VDBE再返回新的指令地址*/
 		}
 	}
-	else if (eDest != SRT_Exists){ /*再次判断处理的结果集是否存在*/ /*如果处理的结果集不存在*/
+	else if (eDest != SRT_Exists){/*如果处理的结果集不存在*/
 		/* If the destination is an EXISTS(...) expression, the actual
 		** values returned by the SELECT are not required.
-		** 如果结果存在，select不用返回值了。
+		** 如果目标是一个EXISTS(...)表达式，由select返回的实际值是不需要的。
 		*/
-		sqlite3ExprCacheClear(pParse);   /*释放一些内存空间*/ /*清除语法分析树的缓存*/
-		sqlite3ExprCodeExprList(pParse, pEList, regResult, eDest == SRT_Output); /*传表达式的值*/ /*把表达式列表中的值放到一系列的寄存器中*/
-	nColumn = nResultCol; /*把结果值赋给列*/ /*赋值列数等于结果列的列数*/
+		sqlite3ExprCacheClear(pParse);  /*清除语法分析树的缓存*/
+		sqlite3ExprCodeExprList(pParse, pEList, regResult, eDest == SRT_Output);/*生成代码，将给定的表达式列表的每个元素的值放到寄存器开始的目标序列。返回元素评估的数量。*/
+	}
+	nColumn = nResultCol;/*给列数赋值结果列的列数*/
 
 	/* If the DISTINCT keyword was present on the SELECT statement
 	** and this row has been seen before, then do not make this row
 	** part of the result.
-	** 如果distinct关键字在select语句中出现，这行之前已经见过，那么这行不作为结果的一部分。
+	** 如果distinct关键字在select语句中出现，那么行输出之前，不会使改行成为结果中的一部分
 	*/
-	if (hasDistinct){ /*判断hasDistinct是否存在*/ /*如果使用了distinct关键字*/
-		assert(pEList != 0); /*调用函数做判断其值是否存在*/ /*做断点，判断被提取的值列表是否为空*/
-		assert(pEList->nExpr == nColumn); /*调用函数取值*/ /*被提取的值列表的列数是否等于列数*/
-		codeDistinct(pParse, distinct, iContinue, nColumn, regResult); /*调用函数进行去除操作*/ /*进行“去除重复操作”*/
-		if (pOrderBy == 0){ /*判断搜索的结果值是否为0*/ /*如果没有使用ORDERBY字句 */
-			codeOffset(v, p, iContinue); /*调用函数，计算产生结果*/ /*使用codeOffset（），设置逐条进行产生结果*/
+	if (hasDistinct){/*如果使用了distinct关键字*/
+		assert(pEList != 0);/*做断点，判断被提取的值列表是否为空*/
+		assert(pEList->nExpr == nColumn);/*被提取的值列表的列数是否等于列数*/
+		codeDistinct(pParse, distinct, iContinue, nColumn, regResult);/*进行“去除重复操作”*/
+		if (pOrderBy == 0){/*如果没有使用ORDERBY字句 */
+			codeOffset(v, p, iContinue);/*使用codeOffset（），设置逐条进行产生结果*/
 		}
 	}
 
-	switch (eDest){ /*用循环进行操作*/ /*定义switch函数，根据参数eDest判断怎样处理结果*/
+	switch (eDest){/*定义switch函数，根据参数eDest判断怎样处理结果*/
 		/* In this mode, write each query result to the key of the temporary
 		** table iParm.
 		** 在这种模式下，给临时表iParm写入每个查询结果。
 		*/
-#ifndef SQLITE_OMIT_COMPOUND_SELECT /*测试SQLITE_OMIT_COMPOUND_SELECT是否被宏定义过*/
+#ifndef SQLITE_OMIT_COMPOUND_SELECT/*测试SQLITE_OMIT_COMPOUND_SELECT是否被宏定义过*/
 	case SRT_Union: {/*如果eDest为SRT_Union，则结果作为关键字存储在索引*/
-		int r1;/*定义一个整型数据*/
+		int r1;
 		r1 = sqlite3GetTempReg(pParse);/*分配一个新的寄存器控制中间结果，返回值赋给r1*/
 		sqlite3VdbeAddOp3(v, OP_MakeRecord, regResult, nColumn, r1);/*把OP_MakeRecord（做记录）操作送入VDBE，再返回一个新指令地址*/
 		sqlite3VdbeAddOp2(v, OP_IdxInsert, iParm, r1);/*把OP_IdxInsert（索引插入）操作送入VDBE，再返回一个新指令地址*/
 		sqlite3ReleaseTempReg(pParse, r1);/*释放寄存器，使其可以从用于其他目的。如果一个寄存器当前被用于列缓存，则dallocation被推迟，直到使用的列寄存器变的陈旧*/
-		break; /*调出这层循环*/
+		break;
 	}
 
 		/* Construct a record from the query result, but instead of
@@ -871,9 +754,9 @@ static void selectInnerLoop( /*定义选择插入函数*/  /*select内连接循�
 		** the temporary table iParm.
 		** 构建一个记录的查询结果，但不是保存该记录，将其作为从临时表iParm删除元素的一个键。
 		*/
-	case SRT_Except: {/*利用case分支判断*/ /*如果eDest为SRT_Except，则从union索引中移除结果*/
+	case SRT_Except: {/*如果eDest为SRT_Except，则从union索引中移除结果*/
 		sqlite3VdbeAddOp3(v, OP_IdxDelete, iParm, regResult, nColumn); /*添加一个新的指令VDBE指示当前的列表。返回新指令的地址。*/
-		break;/*跳出这一层循环*/
+		break;
 	}
 #endif/*终止if*/
 
@@ -881,24 +764,24 @@ static void selectInnerLoop( /*定义选择插入函数*/  /*select内连接循�
 		** Store the result as data using a unique key.
 		** 存储数据使用唯一关键字的结果
 		*/
-	case SRT_Table: /*如果eDest为SRT_Table，则结果按照自动的rowid自动保存*/
-	case SRT_EphemTab: { /*考虑另一case情况*/ /*如果eDest为SRT_EphemTab，则创建临时表并存储为像SRT_Table的表*/
-		int r1 = sqlite3GetTempReg(pParse);  /*定义一个整型并对其进行赋值*/ /*分配一个新的寄存器用于控制中间结果，并把返回值赋给r1*/
-		testcase(eDest == SRT_Table); /*调用函数进行判断传值表*/ /*测试处理的结果集的表名称*/
-		testcase(eDest == SRT_EphemTab); /*调用函数进行判断传值表的大小*/ /*测试处理的结果集的表的大小*/
-		sqlite3VdbeAddOp3(v, OP_MakeRecord, regResult, nColumn, r1); /*调用函数进行增加项*/ /*添加一个新的指令VDBE指示当前的列表。返回新指令的地址。*/
-		if (pOrderBy){ /*调用判断语句进行判断*/ /*如果有orderby字句*/
-			pushOntoSorter(pParse, pOrderBy, p, r1);/*推到栈顶端*/ /*插入代码"V"，在分选机将会推进记录到栈的顶部*/
+	case SRT_Table:/*如果eDest为SRT_Table，则结果按照自动的rowid自动保存*/
+	case SRT_EphemTab: {/*如果eDest为SRT_EphemTab，则创建临时表并存储为像SRT_Table的表*/
+		int r1 = sqlite3GetTempReg(pParse); /*分配一个新的寄存器用于控制中间结果，并把返回值赋给r1*/
+		testcase(eDest == SRT_Table);/*测试处理的结果集的表名称*/
+		testcase(eDest == SRT_EphemTab);/*测试处理的结果集的表的大小*/
+		sqlite3VdbeAddOp3(v, OP_MakeRecord, regResult, nColumn, r1);/*添加一个新的指令VDBE指示当前的列表。返回新指令的地址。*/
+		if (pOrderBy){/*如果有orderby字句*/
+			pushOntoSorter(pParse, pOrderBy, p, r1);/*插入代码"V"，在分选机将会推进记录到栈的顶部*/
 		}
 		else{
-			int r2 = sqlite3GetTempReg(pParse); /*定义整型元素进行赋值*/ /*分配一个新的寄存器用于控制中间结果，并把返回值赋给r2*/
-			sqlite3VdbeAddOp2(v, OP_NewRowid, iParm, r2); /*调用函数进行传值*/ /*把OP_NewRowid（新建记录）操作送入VDBE，再返回一个新指令地址*/
-			sqlite3VdbeAddOp3(v, OP_Insert, iParm, r1, r2); /*调用函数进行取值*/ /*把OP_Insert（插入记录）操作送入VDBE，再返回一个新指令地址*/
-			sqlite3VdbeChangeP5(v, OPFLAG_APPEND);  /*调用函数进行取值*/ /*对于最新添加的操作，改变p5操作数的值。*/
-			sqlite3ReleaseTempReg(pParse, r2);/*调用进行释放空间*/ /*释放寄存器，使其可以从用于其他目的。如果一个寄存器当前被用于列缓存，则dallocation被推迟，直到使用的列寄存器变的陈旧*/
+			int r2 = sqlite3GetTempReg(pParse);/*分配一个新的寄存器用于控制中间结果，并把返回值赋给r2*/
+			sqlite3VdbeAddOp2(v, OP_NewRowid, iParm, r2);/*把OP_NewRowid（新建记录）操作送入VDBE，再返回一个新指令地址*/
+			sqlite3VdbeAddOp3(v, OP_Insert, iParm, r1, r2);/*把OP_Insert（插入记录）操作送入VDBE，再返回一个新指令地址*/
+			sqlite3VdbeChangeP5(v, OPFLAG_APPEND);  /*对于最新添加的操作，改变p5操作数的值。*/
+			sqlite3ReleaseTempReg(pParse, r2);/*释放寄存器，使其可以从用于其他目的。如果一个寄存器当前被用于列缓存，则dallocation被推迟，直到使用的列寄存器变的陈旧*/
 		}
-		sqlite3ReleaseTempReg(pParse, r1); /*释放占用的寄存器空间*//*释放寄存器*/
-		break; /*跳出这层循环*/
+		sqlite3ReleaseTempReg(pParse, r1);/*释放寄存器*/
+		break;
 	}
 
 #ifndef SQLITE_OMIT_SUBQUERY/*测试SQLITE_OMIT_SUBQUERY是否被宏定义过*/
@@ -930,7 +813,7 @@ static void selectInnerLoop( /*定义选择插入函数*/  /*select内连接循�
 			sqlite3VdbeAddOp2(v, OP_IdxInsert, iParm, r1);/*把OP_IdxInsert操作送入VDBE，再返回一个新指令地址*/
 			sqlite3ReleaseTempReg(pParse, r1);/*释放寄存器*/
 		}
-		break;/*跳出这层循环*/
+		break;
 	}
 
 		/* 
@@ -943,7 +826,7 @@ static void selectInnerLoop( /*定义选择插入函数*/  /*select内连接循�
 		** The LIMIT clause will terminate the loop for us
 		** limit子句将终止我们的循环
 		*/
-		break;/*跳出这层循环*/
+		break;
 	}
 
 		/* 
@@ -954,7 +837,7 @@ static void selectInnerLoop( /*定义选择插入函数*/  /*select内连接循�
 		*/
 	case SRT_Mem: {/*如果eDest为SRT_Mem，则将结果存储在存储单元*/
 		assert(nColumn == 1);/*做断点，判断被提取的值列表是否为空*/
-		if (pOrderBy){/*判断条件子句*/
+		if (pOrderBy){
 			pushOntoSorter(pParse, pOrderBy, p, regResult);/*推入栈顶*/
 		}
 		else{
@@ -964,34 +847,33 @@ static void selectInnerLoop( /*定义选择插入函数*/  /*select内连接循�
 			** limit子句会为我们跳出循环
 			*/
 		}
-		break; /*跳出这层循环*/
+		break;
 	}
 #endif /* #ifndef SQLITE_OMIT_SUBQUERY */
 		/* 
 		** Send the data to the callback function or to a subroutine.  In the
 		** case of a subroutine, the subroutine itself is responsible for
 		** popping the data from the stack.
-		** 将数据发送到回调函数或子程序。在子程序的情况下，子程序本身负责从堆栈中弹出数据。
-		*/
-		testcase(eDest == SRT_Coroutine); /*调用函数处理结果*//*测试处理结果集是否是协同处理*/
-		testcase(eDest == SRT_Output);  /*调用函数判断是否有输出结果集*/  /*测试处理结果集是否要输出*/
-		if (pOrderBy){ /*判断是否存在子句*/ /*如果包含了OEDERBY子句*/
-			int r1 = sqlite3GetTempReg(pParse);/*定义整型数据进行传值*/ /*分配一个寄存器，存储中间计算结果*/
-			sqlite3VdbeAddOp3(v, OP_MakeRecord, regResult, nColumn, r1); /*调用函数进行增加函数的传值*/ /*把OP_MakeRecord操作送入VDBE，再返回一个新指令地址*/
-			pushOntoSorter(pParse, pOrderBy, p, r1); /*传一些值到栈顶部*/ /*推入栈顶*/
-			sqlite3ReleaseTempReg(pParse, r1);/*释放内存里的空间*/ /*释放寄存器*/
+		/*给回调函数或子程序发送数据，在子程序中，子程序从堆中弹出数据*/
+		testcase(eDest == SRT_Coroutine);/*测试处理结果集是否是协同处理*/
+		testcase(eDest == SRT_Output);   /*测试处理结果集是否要输出*/
+		if (pOrderBy){/*如果包含了OEDERBY子句*/
+			int r1 = sqlite3GetTempReg(pParse);/*分配一个寄存器，存储中间计算结果*/
+			sqlite3VdbeAddOp3(v, OP_MakeRecord, regResult, nColumn, r1);/*把OP_MakeRecord操作送入VDBE，再返回一个新指令地址*/
+			pushOntoSorter(pParse, pOrderBy, p, r1);/*把ORDERBY操作记录放到分拣器的栈顶*/
+			sqlite3ReleaseTempReg(pParse, r1);/*释放寄存器*/
 		}
-		else if (eDest == SRT_Coroutine){ /*判断是否还要进行处理结果*/ /*如果处理结果集是协同处理*/
-			sqlite3VdbeAddOp1(v, OP_Yield, pDest->iSDParm); /*调用函数进行增加值*/ /*把OP_Yield操作送入VDBE，再返回一个新指令地址*/
+		else if (eDest == SRT_Coroutine){/*如果处理结果集是协同处理*/
+			sqlite3VdbeAddOp1(v, OP_Yield, pDest->iSDParm);/*把OP_Yield操作送入VDBE，再返回一个新指令地址*/
 		}
 		else{
-			sqlite3VdbeAddOp2(v, OP_ResultRow, regResult, nColumn); /*调用增加函数进行传值*/ /*把OP_ResultRow操作送入VDBE，再返回一个新指令地址*/
-			sqlite3ExprCacheAffinityChange(pParse, regResult, nColumn); /*进行缓存的操作*/ /*记录亲和类型的数据的改变的计数寄存器的起始地址*/
+			sqlite3VdbeAddOp2(v, OP_ResultRow, regResult, nColumn);/*把OP_ResultRow操作送入VDBE，再返回一个新指令地址*/
+			sqlite3ExprCacheAffinityChange(pParse, regResult, nColumn);/*记录亲和类型的数据的改变的计数寄存器的起始地址*/
 		}
-		break; /*跳出这层循环*/
+		break;
 		}
 
-#if !defined(SQLITE_OMIT_TRIGGER)/*条件编译传值*/ /*条件编译*/
+#if !defined(SQLITE_OMIT_TRIGGER)/*条件编译*/
 		/* 
 		** Discard the results.  This is used for SELECT statements inside
 		** the body of a TRIGGER.  The purpose of such selects is to call
@@ -1001,19 +883,16 @@ static void selectInnerLoop( /*定义选择插入函数*/  /*select内连接循�
 		** 我们不必关心实际的选择结果。
 		*/
 	default: {/*默认条件下*/
-		assert(eDest == SRT_Discard); /*调用函数进行判断是否需要传值*/ /*如果处理结果集是SRT_Discard（舍弃）*/
-		break; /*跳出这层循环*/ 
+		assert(eDest == SRT_Discard);/*如果处理结果集是SRT_Discard（舍弃）*/
+		break;
 	}
 #endif/*条件编译结束*/
 	}
 
-
 	/* Jump to the end of the loop if the LIMIT is reached.  Except, if
 	** there is a sorter, in which case the sorter has already limited
 	** the output for us.
-	** 除了有一个分选机，在这种情况下分选机已经限制了我们的输出。
-	** 如果符合limit子句的条件则跳转到循环结束。
-	*/
+	*//*如果到Limit的限制处，直接跳到结尾。如果这个是分拣器，分拣器会限制输出的。*/
 	if (pOrderBy == 0 && p->iLimit){/*如果不包含ORDERBY并且含有limit子句*/
 		sqlite3VdbeAddOp3(v, OP_IfZero, p->iLimit, iBreak, -1);/*把OP_IfZero操作送入VDBE，再返回一个新指令地址*/
 	}
@@ -1040,11 +919,11 @@ static void selectInnerLoop( /*定义选择插入函数*/  /*select内连接循�
 ** 保存KeyInfo结构体的空间是由malloc获得。调用函数负责看到这个结构体最终释放。
 ** KeyInfo结构添加到使用P4_KEYINFO_HANDOFF P4的一个操作码是通常的处理方式。
 */
-static KeyInfo *keyInfoFromExprList(Parse *pParse, ExprList *pList){/*定义静态的结构体指针函数keyInfoFromExprList*/
-	sqlite3 *db = pParse->db;/*把结构体类型是pParse的成员变量db赋给结构体类型是sqlite3的指针db*/
+static KeyInfo *keyInfoFromExprList(Parse *pParse, ExprList *pList){/*传入两个参数，一个为语法分析树，一个为表达式列表*/
+	sqlite3 *db = pParse->db;/*把结构体类型是pParse的成员变量db赋给结构体类型是sqlite3的指针db，并且声明数据库连接*/
 	int nExpr;
 	KeyInfo *pInfo;/*定义结构体类型是KeyInfo的指针pInfo*/
-	struct ExprList_item *pItem;/*定义结构体类型是ExprList_item的指针pItem*/
+	struct ExprList_item *pItem;/*定义结构体类型是ExprList_item的指针pItem，声明表达式项结构体*/
 	int i;
 
 	nExpr = pList->nExpr;/*声明表达式列表中表达式的个数*/
@@ -1062,7 +941,7 @@ static KeyInfo *keyInfoFromExprList(Parse *pParse, ExprList *pList){/*定义静�
 			}
 			pInfo->aColl[i] = pColl;/*关键信息结构体中对关键字排序数组中元素对应表达式中排序的名称*/
 			pInfo->aSortOrder[i] = pItem->sortOrder;/*关键信息结构体中排序的顺序为语法分析树中语法项表达式的排序方法*/
-			/*备注：做标记，我没有看懂这种排序的方法，个人理解为把指定使用某种排序的方式记下来，如果没有使用系统默认的。再把语法树中表达式记下来，两者应该是一个东西，只是表达的方式不一样*/
+			/*个人理解为把指定使用某种排序的方式记下来，如果没有使用系统默认的。再把语法树中表达式记下来，两者应该是一个东西，只是表达的方式不一样*/
 		}
 	}
 	return pInfo;/*返回这个关键信息结构体*/
@@ -1095,8 +974,7 @@ static const char *selectOpName(int id){/*定义静态且是只读的字符型�
 **
 ** where xxx is one of "DISTINCT", "ORDER BY" or "GROUP BY". Exactly which
 ** is determined by the zUsage argument.
-** 除非一个"EXPLAIN QUERY PLAN"命令正在处理，否则这个功能就是一个空操作。
-** 否则，它增加一个单独的输出行到EQP结果，标题的形式为:
+**除非查询计划能够执行，这个函数才不会执行，否则会添加一个单独的行进行输出，输出的格式：
 ** "USE TEMP B-TREE FOR xxx"
 ** 其中xxx是"distinct","order by",或者"group by"中的一个。究竟是哪个由
 ** zUsage参数决定。
@@ -1153,13 +1031,13 @@ static void explainTempTable(Parse *pParse, const char *zUsage){
 */
 static void explainComposite(
 	Parse *pParse,                  /* Parse context 语义分析*/
-	int op,                         /* One of TK_UNION, TK_EXCEPT etc.   TK_UNION, TK_EXCEPT等运算符中的一个*/
+	int op,                         /* One of TK_UNION, TK_EXCEPT etc.  *//*一个TK_UNION或TK_EXCEPT等类似的令牌*/
 	int iSub1,                      /* Subquery id 1 子查询id 1*/
 	int iSub2,                      /* Subquery id 2 子查询id 2*/
-	int bUseTmp                     /* True if a temp table was used 如果临时表被使用就是true*/
+	int bUseTmp                     /* True if a temp table was used *//*如果是使用了一张临时表，那么值为true*/
 	){
 	assert(op == TK_UNION || op == TK_EXCEPT || op == TK_INTERSECT || op == TK_ALL);/*测试op是否有TK_UNION或TK_EXCEPT或TK_INTERSECT或TK_ALL*/
-	if (pParse->explain == 2){/*如果pParse->explain与字符z相同*/
+	if (pParse->explain == 2){/*如果使用了解释方式是语法分析树中第二种方式*/
 		Vdbe *v = pParse->pVdbe;/*声明一个虚拟机*/
 		char *zMsg = sqlite3MPrintf(/*设置标记信息*/
 			pParse->db, "COMPOUND SUBQUERIES %d AND %d %s(%s)", iSub1, iSub2,
@@ -1169,8 +1047,7 @@ static void explainComposite(
 	}
 }
 #else
-/* No-op versions of the explainXXX() functions and macros. explainXXX()函数和宏的无操作版本。*/
-# define explainComposite(v,w,x,y,z)
+/* No-op versions of the explainXXX() functions and macros. /* 没有解释某个操作的函数和宏定义的操作符版本*/
 #endif
 
 /*
@@ -1182,96 +1059,91 @@ static void explainComposite(
 ** 循环终止后我们需要运行分选机和输出结果。下面的例程生成所需的代码。
 */
 static void generateSortTail(
-	Parse *pParse,    /* Parsing context 语义分析*/ /* Parsing context |语义分析*/
-	Select *p,        /* The SELECT statement   select语句*//* The SELECT statement   |select语句*/
-	Vdbe *v,          /* Generate code into this VDBE  在VDBE中生成代码**//* Generate code into this VDBE  |在VDBE中生成代码**/
-	int nColumn,      /* Number of columns of data 数据种列的数目*//* Number of columns of data |数据的列数*/
-	SelectDest *pDest /* Write the sorted results here 在这里写入排序结果*//* Write the sorted results here |在这里写入排序结果*/
+	Parse *pParse,    /* Parsing context 语义分析*/
+	Select *p,        /* The SELECT statement   select语句*/
+	Vdbe *v,          /* Generate code into this VDBE  在VDBE中生成代码**/
+	int nColumn,      /* Number of columns of data 数据种列的数目*/
+	SelectDest *pDest /* Write the sorted results here 在这里写入排序结果*/
 	){
-	int addrBreak = sqlite3VdbeMakeLabel(v);     /* Jump here to exit loop 跳转到这里退出循环*/ /* Jump here to exit loop |中断循环的跳转地址*/
-	int addrContinue = sqlite3VdbeMakeLabel(v);  /* Jump here for next cycle 跳转到这里进行下一个循环*/ /* Jump here for next cycle |继续下轮循环的跳转地址*/
+	int addrBreak = sqlite3VdbeMakeLabel(v);     /* Jump here to exit loop 跳转到这里退出循环*/
+	int addrContinue = sqlite3VdbeMakeLabel(v);  /* Jump here for next cycle 跳转到这里进行下一个循环*/
 	int addr;
 	int iTab;
 	int pseudoTab = 0;
 	ExprList *pOrderBy = p->pOrderBy;/*将Select结构体中ORDERBY赋值到表达式列表中的ORDERBY表达式属性*/
 
-	int eDest = pDest->eDest;/*将查询结果集中处理方式传递给eDest*//*定义Select结果的处理方式*/
+	int eDest = pDest->eDest;/*将查询结果集中处理方式传递给eDest*/
 	int iParm = pDest->iSDParm;/*将查询结果集中处理方式中的参数传递给iParm*/
 
 	int regRow;
-	int regRowid;/*寄存器暂存CREATE TABLE入口的行ID地址*//*寄存器暂存CREATE TABLE入口的行ID地址*/
+	int regRowid;
 
-	iTab = pOrderBy->iECursor;/*把pOrderBy->iECursor赋给整型iTab*//*把pOrderBy->iECursor（排序器的游标数目）赋给整型iTab*/
-	regRow = sqlite3GetTempReg(pParse);/*为pParse语法树分配一个寄存器,存储计算的中间结果*//*分配一个新的寄存器，用于暂存中间结果。*/
-	if (eDest == SRT_Output || eDest == SRT_Coroutine){/*如果处理方式是SRT_Output（输出）或SRT_Coroutine（协同程序）*//*如果eDest==SRT_Output(输出每行结果)、
-                                                  或者==SRT_Coroutine（结果生成的一个单行）*/
-		pseudoTab = pParse->nTab++;/*逐次将分析语法树中表数传给pseudoTab（虚表）*//*把 列游标数目 赋给pseudoTab后自加*/
-		sqlite3VdbeAddOp3(v, OP_OpenPseudo, pseudoTab, regRow, nColumn);/*将OP_Explain操作交给虚拟机*//*向当前VDBE的指令列表中添加一条新指令*/
+	iTab = pOrderBy->iECursor;/*把pOrderBy->iECursor赋给整型iTab*/
+	regRow = sqlite3GetTempReg(pParse);/*为pParse语法树分配一个寄存器,存储计算的中间结果*/
+	if (eDest == SRT_Output || eDest == SRT_Coroutine){/*如果处理方式是SRT_Output（输出）或SRT_Coroutine（协同程序）*/
+		pseudoTab = pParse->nTab++;/*逐次将分析语法树中表数传给pseudoTab（虚表）*/
+		sqlite3VdbeAddOp3(v, OP_OpenPseudo, pseudoTab, regRow, nColumn);/*将OP_Explain操作交给虚拟机*/
 		regRowid = 0;
 	}
-	else{/*否则，分配一个新的寄存器给regRowid*/
+	else{
 		regRowid = sqlite3GetTempReg(pParse);/*为pParse语法树分配一个寄存器,存储计算的中间结果*/
 	}
-	if (p->selFlags & SF_UseSorter){/*如果选择标志位存在，并且=SF_UseSorter（使用排序[最新版中已弃用该标志位]）。“SF_”=“Select Flag”*//*如果Select结构体中的selFlags属性值为SF_UseSorter，使用分拣器（排序程序）*/
+	if (p->selFlags & SF_UseSorter){/*如果Select结构体中的selFlags属性值为SF_UseSorter，使用分拣器（排序程序）*/
 		int regSortOut = ++pParse->nMem;/*分配寄存器，个数是分析语法树中内存数+1*/
 		int ptab2 = pParse->nTab++;/*将分析语法树中表的个数赋值给ptab2*/
 		sqlite3VdbeAddOp3(v, OP_OpenPseudo, ptab2, regSortOut, pOrderBy->nExpr + 2);/*将OP_OpenPseudo（打开虚拟操作）交给VDBE，返回表达式列表中表达式个数的值+2*/
 		addr = 1 + sqlite3VdbeAddOp2(v, OP_SorterSort, iTab, addrBreak);/*将OP_SorterSort（分拣器进行排序）交给VDBE，返回的地址+1赋值给addr*/
-		codeOffset(v, p, addrContinue);/*设置偏移量，其中addrContinue是下一次循环要调到的地址*//*添加代码来实现offset*/
+		codeOffset(v, p, addrContinue);/*设置偏移量，其中addrContinue是下一次循环要调到的地址*/
 		sqlite3VdbeAddOp2(v, OP_SorterData, iTab, regSortOut);/*将OP_SorterData操作交给虚拟机*/
 		sqlite3VdbeAddOp3(v, OP_Column, ptab2, pOrderBy->nExpr + 1, regRow);/*将OP_Column操作交给虚拟机*/
-		sqlite3VdbeChangeP5(v, OPFLAG_CLEARCACHE);/*把操作数P5的值改为OPFLAG_CLEARCACHE*//*改变OPFLAG_CLEARCACHE（清除缓存）的操作数，因为地址经过sqlite3VdbeAddOp3和sqlite3VdbeAddOp2（）函数改变了地址*/
+		sqlite3VdbeChangeP5(v, OPFLAG_CLEARCACHE);/*改变OPFLAG_CLEARCACHE（清除缓存）的操作数，因为地址经过sqlite3VdbeAddOp3和sqlite3VdbeAddOp2（）函数改变了地址*/
 	}
 	else{
 		addr = 1 + sqlite3VdbeAddOp2(v, OP_Sort, iTab, addrBreak);/*将OP_Sort操作交给虚拟机，返回的地址+1*/
-		codeOffset(v, p, addrContinue);/*设置偏移量，其中addrContinue是下一次循环要调到的地址*//*添加代码来实现offset*/
-		sqlite3VdbeAddOp3(v, OP_Column, iTab, pOrderBy->nExpr + 1, regRow);/*把操作数P5的值改为OPFLAG_CLEARCACHE*//*将OP_Column操作交给VDBE，再把OP_Column的地址返回*/
+		codeOffset(v, p, addrContinue);/*设置偏移量，其中addrContinue是下一次循环要调到的地址*/
+		sqlite3VdbeAddOp3(v, OP_Column, iTab, pOrderBy->nExpr + 1, regRow);/*将OP_Column操作交给VDBE，再把OP_Column的地址返回*/
 	}
-	switch (eDest){/*switch函数，参数eDest*//*switch函数，参数eDest，选择结果集的处理方法*/
-	case SRT_Table:/*如果eDest为SRT_Table，即：结果按照自动的rowid自动保存*//*如果eDest为SRT_Table，则结果按照自动的rowid自动保存*/
-	case SRT_EphemTab: {/*如果eDest为SRT_EphemTab，即：创建临时表并存储为像SRT_Table的表*//*如果eDest为SRT_EphemTab，则创建临时表并存储为像SRT_Table的表*/
+	switch (eDest){/*switch函数，参数eDest，选择结果集的处理方法*/
+	case SRT_Table:/*如果eDest为SRT_Table，则结果按照自动的rowid自动保存*/
+	case SRT_EphemTab: {/*如果eDest为SRT_EphemTab，则创建临时表并存储为像SRT_Table的表*/
 		testcase(eDest == SRT_Table);/*处理方式中是否SRT_Table*/
 		testcase(eDest == SRT_EphemTab);/*处理方式中是否SRT_EphemTab*/
 		sqlite3VdbeAddOp2(v, OP_NewRowid, iParm, regRowid);/*将OP_NewRowid操作交给VDBE，再返回这个操作的地址*/
 		sqlite3VdbeAddOp3(v, OP_Insert, iParm, regRow, regRowid);/*将OP_Insert操作交给VDBE，再返回这个操作的地址*/
-		sqlite3VdbeChangeP5(v, OPFLAG_APPEND);/*把操作数P5的值改为OPFLAG_APPEND*//*改变OPFLAG_APPEND（设置路径），因为地址经过sqlite3VdbeAddOp2（）和sqlite3VdbeAddOp3（）函数改变了地址*/
+		sqlite3VdbeChangeP5(v, OPFLAG_APPEND);/*改变OPFLAG_APPEND（设置路径），因为地址经过sqlite3VdbeAddOp2（）和sqlite3VdbeAddOp3（）函数改变了地址*/
 		break;
 	}
-#ifndef SQLITE_OMIT_SUBQUERY/*测试SQLITE_OMIT_SUBQUERY是否被宏定义过*//*测试SQLITE_OMIT_SUBQUERY是否被宏定义过*/
-	case SRT_Set: {/*如果eDest为SRT_Set，则结果作为关键字存入索引*//*如果eDest为SRT_Set，即：把结果作为关键字存入索引*/
+#ifndef SQLITE_OMIT_SUBQUERY /*测试SQLITE_OMIT_SUBQUERY是否被宏定义过*/
+	case SRT_Set: {/*如果eDest为SRT_Set，则结果作为关键字存入索引*/
 		assert(nColumn == 1);/*加入断点，判断列数是否等于1*/
 		sqlite3VdbeAddOp4(v, OP_MakeRecord, regRow, 1, regRowid, &p->affinity, 1);/*添加一个OP_MakeRecord操作，并将它的值作为一个指针*/
 		sqlite3ExprCacheAffinityChange(pParse, regRow, 1); /*记录从iStart开始，发生在iCount寄存器中的改变的事实。*/
 		sqlite3VdbeAddOp2(v, OP_IdxInsert, iParm, regRowid);/*将OP_IdxInsert（索引插入）操作交给VDBE，再返回这个操作的地址*/
 		break;
 	}
-	case SRT_Mem: {/*如果eDest为SRT_Mem，则将结果存储在存储单元*//*如果eDest为SRT_Mem，即：将结果存储在存储单元*/
+	case SRT_Mem: {/*如果eDest为SRT_Mem，则将结果存储在存储单元*/
 		assert(nColumn == 1);/*加入断点，判断列数是否等于1*/
 		sqlite3ExprCodeMove(pParse, regRow, iParm, 1);/*释放寄存器中的内容，保持寄存器的内容及时更新*/
 		/* 
 		** The LIMIT clause will terminate the loop for us
 		** limit子句将为我们终止循环
 		*/
-		
-		/* The LIMIT clause will terminate the loop for us 
-      **limit子句将终止我们的循环
-      */
 		break;
 	}
 #endif/*终止if*/
-	default: {/*默认条件*/
+	default: {
 		int i;
-		assert(eDest == SRT_Output || eDest == SRT_Coroutine); /*执行assert函数*//*插入断点，判断结果集处理类型是否有SRT_Output（输出）或SRT_Coroutine（协同处理）*/
+		assert(eDest == SRT_Output || eDest == SRT_Coroutine); /*插入断点，判断结果集处理类型是否有SRT_Output（输出）或SRT_Coroutine（协同处理）*/
 		testcase(eDest == SRT_Output);/*测试是否包含SRT_Output*/
 		testcase(eDest == SRT_Coroutine);/*测试是否包含SRT_Coroutine*/
-		for (i = 0; i<nColumn; i++){/*遍历列*//*执行for循环语句*//*满足if条件，执行if语句*/
+		for (i = 0; i<nColumn; i++){/*遍历列*/
 			assert(regRow != pDest->iSdst + i);/*插入断点，判断寄存器的编号值不等于基址寄存器的编号值+i*/
 			sqlite3VdbeAddOp3(v, OP_Column, pseudoTab, i, pDest->iSdst + i);/*将OP_Column操作交给VDBE，再返回这个操作的地址*/
 			if (i == 0){/*如果没有列*/
 				sqlite3VdbeChangeP5(v, OPFLAG_CLEARCACHE);/*改变OPFLAG_CLEARCACHE（清除缓存）的操作数，因为地址经过sqlite3VdbeAddOp3（）函数改变了地址*/
 			}
 		}
-		if (eDest == SRT_Output){/*如果结果集的处理方式是SRT_Output*//*循环结束，执行if语句，否则执行else语句*/
+		if (eDest == SRT_Output){/*如果结果集的处理方式是SRT_Output*/
 			sqlite3VdbeAddOp2(v, OP_ResultRow, pDest->iSdst, nColumn);/*将OP_ResultRow操作交给VDBE，再返回这个操作的地址*/
 			sqlite3ExprCacheAffinityChange(pParse, pDest->iSdst, nColumn);/*处理语法树pParse，寄存器中的亲和性数据*/
 		}
@@ -1281,23 +1153,20 @@ static void generateSortTail(
 		break;
 	}
 	}
-	  /*释放临时寄存器*/
 	sqlite3ReleaseTempReg(pParse, regRow);/*释放寄存器*/
 	sqlite3ReleaseTempReg(pParse, regRowid);/*释放寄存器*/
 
 	/* The bottom of the loop
 	** 循环的底部
 	*/
-	 /* 循环的底部 */
-	sqlite3VdbeResolveLabel(v, addrContinue);/*解析插入的下一条指令的地址*//*addrContinue作为下一条插入指令的地址，其中addrContinue能优先调用sqlite3VdbeMakeLabel（）*/
-	/*根据满足条件，执行下列条件语句*//*addrContinue作为下一条插入指令的地址，其中addrContinue能优先调用sqlite3VdbeMakeLabel（）*/
+	sqlite3VdbeResolveLabel(v, addrContinue);/*addrContinue作为下一条插入指令的地址，其中addrContinue能优先调用sqlite3VdbeMakeLabel（）*/
 	if (p->selFlags & SF_UseSorter){/*selFlags的值是SF_UseSorter*/
 		sqlite3VdbeAddOp2(v, OP_SorterNext, iTab, addr);/*将OP_SorterNext操作交给VDBE，再返回这个操作的地址*/
 	}
 	else{
 		sqlite3VdbeAddOp2(v, OP_Next, iTab, addr);/*将OP_Next操作交给VDBE，再返回这个操作的地址*/
 	}
-	sqlite3VdbeResolveLabel(v, addrBreak);/*解析插入的下一条指令的地址*//*addrBreak作为下一条插入指令的地址，其中addrBreak能优先调用sqlite3VdbeMakeLabel（）*/
+	sqlite3VdbeResolveLabel(v, addrBreak);/*addrBreak作为下一条插入指令的地址，其中addrBreak能优先调用sqlite3VdbeMakeLabel（）*/
 	if (eDest == SRT_Output || eDest == SRT_Coroutine){/*如果结果集的处理方式SRT_Output或SRT_Coroutine*/
 		sqlite3VdbeAddOp2(v, OP_Close, pseudoTab, 0);/*将OP_Close操作交给VDBE，再返回这个操作的地址*/
 	}
@@ -1322,7 +1191,7 @@ static void generateSortTail(
 ** The declaration type for any expression other than a column is NULL.
 **
 **
-** 返回一个指向表达式pExpr 包含 'declaration type'的字符串。
+** 返回一个包含'declaration type'（声明类型）表达式字符串。
 ** 这个字符串可以视为静态调用者。
 ** 如果表达式是一列，声明类型是确切的数据类型定义从最初的
 ** create table 语句中获取。ROWID字段的声明类型是整数。当一个表达式
@@ -1346,9 +1215,9 @@ static const char *columnType(/*定义静态且是只读的字符型指针column
 	char const *zOriginTab = 0;
 	char const *zOriginCol = 0;
 	int j;
-	if (NEVER(pExpr == 0) || pNC->pSrcList == 0) return 0;/*满足if语句条件，返回0*/
+	if (NEVER(pExpr == 0) || pNC->pSrcList == 0) return 0;/*如果一个表达式为空或决定名字的列表是空的，直接返回0*/
 
-	switch (pExpr->op)/*遍历表达式*/{/*遍历表达式中的操作*/
+	switch (pExpr->op){/*遍历表达式中的操作*/
 	case TK_AGG_COLUMN:
 	case TK_COLUMN: {
 		/* 
@@ -1358,24 +1227,24 @@ static const char *columnType(/*定义静态且是只读的字符型指针column
 		** 表达式是一个列。被定位的表的列从NameContext.pSrcList中提取。
 		** 这个表可能是真实的数据库表，或者是一个子查询。
 		*/
-		Table *pTab = 0;           /*定义一个Table型的指针变量并赋初值为0*/ /* Table structure column is extracted from 表结构列被提取*/
-		Select *pS = 0;              /*定义一个Seclet型的指针变量并赋初值为pExpr->iColumn*//* Select the column is extracted from 选择列被提取*/
-		int iCol = pExpr->iColumn;  /*定义一个整型的iCol变量并赋值为*//* Index of column in pTab 索引列在pTab中*/
+		Table *pTab = 0;            /* Table structure column is extracted from 表结构列被提取*/
+		Select *pS = 0;             /* Select the column is extracted from 选择列被提取*/
+		int iCol = pExpr->iColumn;  /* Index of column in pTab 索引列在pTab中*/
 		testcase(pExpr->op == TK_AGG_COLUMN);/*这个表达式的操作是否是TK_AGG_COLUMN（嵌套列）*/
 		testcase(pExpr->op == TK_COLUMN);/*这个表达式的操作是否是TK_COLUMN（列索引）*/
-		while (pNC && !pTab)/*满足结构体存在与表结构列不存在，则执行循环语句*/{/*命名上下文结构体存在，被提取的表结构列（就是一个被提取的列组成的表）不存在*/
+		while (pNC && !pTab){/*命名上下文结构体存在，被提取的表结构列（就是一个被提取的列组成的表）不存在*/
 			SrcList *pTabList = pNC->pSrcList;/*命名上下文结构体中列表赋值给描述FROM的来源表或子查询结果的列表*/
-			for (j = 0; j<pTabList->nSrc && pTabList->a[j].iCursor != pExpr->iTable; j++);/*遍历查询列*/
-			if (j<pTabList->nSrc)/*满足条件，执行if语句*/{/*如果j小于列表中表的总个数*/
-				pTab = pTabList->a[j].pTab;/*赋值列表中的第j-1表给Table结构体的实体变量pTab*//*把表中的第i-1表赋值给pTab*/
-				pS = pTabList->a[j].pSelect;/*赋值列表中的第j-1表的select结构体给ps*//*把第j-1表的select结构体赋值给pS*/
+			for (j = 0; j<pTabList->nSrc && pTabList->a[j].iCursor != pExpr->iTable; j++);/*遍历查询列表*/
+			if (j<pTabList->nSrc){/*如果j小于列表中表的总个数*/
+				pTab = pTabList->a[j].pTab;/*赋值列表中的第j-1表给Table结构体的实体变量pTab*/
+				pS = pTabList->a[j].pSelect;/*赋值列表中的第j-1表的select结构体给ps*/
 			}
 			else{
-				pNC = pNC->pNext;/*否则，将命名上下文结构体的下一个外部命名上下文赋值给pNC变量*//*否则，把下一个指令赋值给pNC*/
+				pNC = pNC->pNext;/*否则，将命名上下文结构体的下一个外部命名上下文赋值给pNC变量*/
 			}
 		}
 
-		if (pTab == 0)/*如果表为空，则执行if语句*/{
+		if (pTab == 0){
 			/* At one time, code such as "SELECT new.x" within a trigger would
 			** cause this condition to run.  Since then, we have restructured how
 			** trigger code is generated and so this condition is no longer
@@ -1395,9 +1264,9 @@ static const char *columnType(/*定义静态且是只读的字符型指针column
 			** branch below.
 			**
 			**
-			** 在同一时间，诸如触发器内"SELECT new.x "代码将导致这种状态运行。自那时以来，
-			** 我们已重组触发代码是如何生成的，因此该条件不再可能。但是，它仍然可以适用于
-			** 像下面的语句：
+			** 如果表为空的时候，使用 "SELECT new.x" ，声明的触发器将会执行。
+			** 然后我们重新构造了触发器代码，并且这种情况不再可能发生。无论如何，
+			** 下面的语法是正确的：
 			** CREATE TABLE t1(col INTEGER);
 			** SELECT (SELECT t1.col) FROM FROM t1;
 			** 当columnType()调用在子选择中的表达式"t1.col"。在这种情况下，设置列的类型为空，
@@ -1405,27 +1274,25 @@ static const char *columnType(/*定义静态且是只读的字符型指针column
 			** 这不是一个问题，因为" t1.col "的列类型是从未使用过。当columnType ()被调用的
 			** 表达式"(SELECT t1.col)" ，则返回正确的类型(请参阅下面的TK_SELECT分支)。
 			*/
-			break;//结束
+			break;
 		}
 
-		assert(pTab && pExpr->pTab == pTab);
-		if (pS)//如果p不为0，执行下列语句
-		{
+		assert(pTab && pExpr->pTab == pTab);/*插入断点，判断被提取的列组成的表存在或者表达式中的列表存在*/
+		if (pS){
 			/* The "table" is actually a sub-select or a view in the FROM clause
 			** of the SELECT statement. Return the declaration type and origin
 			** data for the result-set column of the sub-select.
 			** "表"实际上是一个子选择，或者是一个在select语句的from子句的视图。
 			** 返回声明类型和来源数据的子选择的结果集列。
 			*/
-			if (iCol >= 0 && ALWAYS(iCol < pS->pEList->nExpr))//如果满足条件，执行if语句
-			{
+			if (iCol >= 0 && ALWAYS(iCol < pS->pEList->nExpr)){
 				/* If iCol is less than zero, then the expression requests the
 				** rowid of the sub-select or view. This expression is legal (see
 				** test case misc2.2.2) - it always evaluates to NULL.
-				** 如果iCol小于零，则表达式请求子选择或视图的rowid。
-				** 这种表达式合法的(见测试案例misc2.2.2)-它始终计算为空。
+			    ** 如果这个列号小于0，然后这个表达式请求子查询结果或视图的关键字。这个表达式是合法的
+			    ** （参见下面misc2.2.2情况）它总被认为是空值。 
 				*/
-				NameContext sNC;//定义一个NameContext变量
+				NameContext sNC;
 				Expr *p = pS->pEList->a[iCol].pExpr;/*被提取的列组成的select结构体中表达式列表中第i个表达式赋值给p*/
 				sNC.pSrcList = pS->pSrc;/*被提取的列组成的select结构体中pSrc（FROM子句）赋值给pSrcList（一个或多个表用来命名的属性）*/
 				sNC.pNext = pNC;/*命名上下文结构体赋值给当前命名上下文结构体的next指针*/
@@ -1433,28 +1300,26 @@ static const char *columnType(/*定义静态且是只读的字符型指针column
 				zType = columnType(&sNC, p, &zOriginDb, &zOriginTab, &zOriginCol); /*将生成的属性类型赋值给zType*/
 			}
 		}
-		else if (ALWAYS(pTab->pSchema))//如果满足所给条件，执行if语句
-		{/*pTab表的模式存在*/
+		else if (ALWAYS(pTab->pSchema)){/*pTab表的模式存在*/
 			/* A real table *//*一个真实的表*/
 			assert(!pS);/*插入断点，判断Select结构体是否为空*/
 			if (iCol<0) iCol = pTab->iPKey;/*如果列号小于0，将表中的关键字数组的首元素赋值给ICol*/
 			assert(iCol == -1 || (iCol >= 0 && iCol<pTab->nCol));/*插入断点，判断ICol正确，在哪个范围*/
-			if (iCol<0){/*如果ICol号小于0*///如果iCol小于0，则执行下列语句
-				zType = "INTEGER";/*将类型定义为整型*///将类型定义为整型
-				zOriginCol = "rowid";/*关键字为rowid*///关键字为rowid
+			if (iCol<0){/*如果ICol号小于0*/
+				zType = "INTEGER";/*将类型定义为整型*/
+				zOriginCol = "rowid";/*关键字为rowid*/
 			}
 			else{
-				zType = pTab->aCol[iCol].zType;/*否则，定义类型为类型表中第iCol的类型*///否则，定义类型为类型表中的第iCol类型
+				zType = pTab->aCol[iCol].zType;/*否则，定义类型为类型表中第iCol的类型*/
 				zOriginCol = pTab->aCol[iCol].zName;/*类型的名字为型表中第iCol的名字*/
 			}
 			zOriginTab = pTab->zName;/*使用默认的名字，定义类型*/
-			if (pNC->pParse)//如果满条件，则执行if语句
-			{/*如果命名上下文结构体中的语法分析树存在*/
+			if (pNC->pParse){/*如果命名上下文结构体中的语法分析树存在*/
 				int iDb = sqlite3SchemaToIndex(pNC->pParse->db, pTab->pSchema);/*将Schema的指针转化给命名上下文结构体中分析语法树的db*/
 				zOriginDb = pNC->pParse->db->aDb[iDb].zName;/*将上下文语法分析树中的db中第i-1个Db的命名赋值给zOriginDb数据库名*/
 			}
 		}
-		break;//结束
+		break;
 	}
 #ifndef SQLITE_OMIT_SUBQUERY
 	case TK_SELECT: {
@@ -1465,7 +1330,7 @@ static const char *columnType(/*定义静态且是只读的字符型指针column
 		/*
 		** 这个表达式是子查询。返回一个声明类型和初始信息给select结果集中的一列。
 		*/
-		NameContext sNC;//定义一个变量sNC
+		NameContext sNC;
 		Select *pS = pExpr->x.pSelect;/*将表达式中Select结构体赋值给一个SELECT结构体实体变量*/
 		Expr *p = pS->pEList->a[0].pExpr;/*将SELECT的表达式列表中第一个表达式赋值给表达式变量p*/
 		assert(ExprHasProperty(pExpr, EP_xIsSelect));/*插入断点，测试是否包含EP_xIsSelect表达式*/
@@ -1473,19 +1338,18 @@ static const char *columnType(/*定义静态且是只读的字符型指针column
 		sNC.pNext = pNC;/*命名上下文结构体赋值给当前命名上下文结构体的next指针*/
 		sNC.pParse = pNC->pParse;/*将命名上下文结构体中分析语法树赋值给当前命名结构体的分析语法树属性*/
 		zType = columnType(&sNC, p, &zOriginDb, &zOriginTab, &zOriginCol); /*返回属性类型*/
-		break;//结束
+		break;
 	}
 #endif
 	}
 
-	if (pzOriginDb)//如果存在原始的数据库，则执行if语句////如果存在原始的数据库，则执行if语句
-	{/*如果存在原始的数据库*/
+	if (pzOriginDb){/*如果存在原始的数据库*/
 		assert(pzOriginTab && pzOriginCol);/*插入断点，判断表和列是否存在*/
 		*pzOriginDb = zOriginDb;/*文件中数据库赋值给数据库变量pzOriginDb*/
 		*pzOriginTab = zOriginTab;/*文件中表赋值给表变量pzOriginTab*/
 		*pzOriginCol = zOriginCol;/*文件中列赋值给列变量pzOriginCol*/
 	}
-	return zType;/*返回列类型*///返回zType类型//返回zType类型
+	return zType;/*返回列类型*/
 }
 
 /////////
